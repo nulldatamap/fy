@@ -1,4 +1,4 @@
 -- Test program:
-$$neg $$add 3 ($$add 2 0)
+$$add 3 argc
 
 -- Cool huh?

@@ -7,6 +7,7 @@ import System.Process
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import Data.List (intersperse)
 import Data.Void
 import Data.Char
 
@@ -31,9 +32,9 @@ data Builtin = BAdd
     deriving Show
 data Expr t = EInt Integer
             | EBuiltin Builtin
-            | EApp (Expr t) [Expr t] t
+            | EIdent t Text
+            | EApp t (Expr t) [Expr t]
     deriving Show
-
 
 type UProgram = Program ()
 type UExpr    = Expr ()
@@ -75,6 +76,7 @@ pBuiltin = try $ do
 pExpr0 :: Parser UExpr
 pExpr0 =  (parens pExpr1)
       <|> (EInt <$> pInteger)
+      <|> ((EIdent ()) <$> pIdent)
       <|> (EBuiltin <$> pBuiltin)
 
 pExpr1 :: Parser UExpr
@@ -84,7 +86,7 @@ pExpr1 = do
   return $
     case es of
       [] -> e
-      _  -> EApp e es ()
+      _  -> EApp () e es
 
 pExpr :: Parser UExpr
 pExpr = pExpr1
@@ -95,6 +97,7 @@ pProgram = Program <$> (sc *> pExpr <* eof)
 emitProgram :: Show a => Program a -> Text
 emitProgram (Program x) = T.concat
   [ "#include <stdio.h>\n\n\
+    \int inc(int x) { return x + 1; }\n\n\
     \int main(int argc, const char** argv) {\n\
     \  printf(\"Result: %d\\n\", ", emitExpr x ,");\n\
     \  return 0;\n\
@@ -102,9 +105,12 @@ emitProgram (Program x) = T.concat
   where
     emitExpr :: Show a => Expr a -> Text
     emitExpr (EInt x) = T.pack $ show x
-    emitExpr (EApp (EBuiltin b) [x, y] _) =
+    emitExpr (EIdent _ x) = x
+    emitExpr (EApp _ (EBuiltin b) [x, y]) =
       case b of
         BAdd -> T.concat [ "(", emitExpr x, " + ", emitExpr y, ")" ]
+    emitExpr (EApp _ e es) =
+      T.concat $ [(emitExpr e), "("] ++ (intersperse ", " $ map emitExpr es) ++ [")"]
     emitExpr x = error $ "Unsuported expression: " ++ (show x)
 
 compileAndRun :: String -> IO ()

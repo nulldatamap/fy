@@ -1,6 +1,7 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable #-}
+{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving #-}
 module Main (main) where
 
+import GHC.Generics (Generic)
 import System.Exit
 import System.Environment
 import System.Process hiding (env)
@@ -8,6 +9,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Data.Set as S
+import Data.Hashable (Hashable)
 import Data.Set (Set)
 import Data.List (intersperse, intercalate)
 import Data.Maybe (fromMaybe)
@@ -15,6 +17,7 @@ import Data.Char
 import Control.Monad (when)
 import Control.Monad.State
 import Control.Monad.Except
+import Data.Graph (stronglyConnComp)
 
 import qualified Data.HashMap.Strict as M
 
@@ -22,12 +25,12 @@ import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
-data CustomParseError = InvalidBuiltin Text
+data CustomParseError = InvalidBuiltin Ident
   deriving (Eq, Ord)
 
 instance ShowErrorComponent CustomParseError where
   showErrorComponent (InvalidBuiltin b) =
-    "`$$" ++ (T.unpack b) ++ "` is not a valid builtin"
+    "`$$" ++ (show b) ++ "` is not a valid builtin"
 
 type Parser = Parsec CustomParseError Text
 
@@ -48,12 +51,25 @@ data Program t = Program (Expr t)
 data Builtin = BAdd
     deriving Show
 
-data Binding t = Binding t Text [Text] (Expr t)
+data Ident = Ident { idName :: Text
+                   , idNamespace :: (Maybe Text)
+                   , idSuffix :: (Maybe Integer) }
+  deriving (Ord, Eq, Generic)
+
+deriving instance Hashable Ident
+
+instance Show Ident where
+  show (Ident n ns sf) =
+    (fromMaybe "" $ fmap ((++"/") . T.unpack) ns)
+    ++ (T.unpack n)
+    ++ (fromMaybe "" $ fmap (('$':) . show) sf)
+
+data Binding t = Binding t Ident [Ident] (Set Ident) (Expr t)
     deriving (Show, Functor, Foldable)
 
 data Expr t = EInt t Integer
             | EBuiltin t Builtin
-            | EIdent t Text
+            | EIdent t Ident
             | EApp t (Expr t) [Expr t]
             | ELet t [Binding t] (Expr t)
     deriving (Show, Functor, Foldable)
@@ -61,12 +77,12 @@ data Expr t = EInt t Integer
 type TyVar = Int
 
 data Type = TVar TyVar
-          | TCons Text [Type]
+          | TCons Ident [Type]
           deriving Eq
 
 data Subst = Subst (M.HashMap Int Type)
 
-type Env = M.HashMap Text Type
+type Env = M.HashMap Ident Type
 
 data TypingSt = TypingSt { nextId       :: Int
                          , currentSubst :: Subst
@@ -74,7 +90,7 @@ data TypingSt = TypingSt { nextId       :: Int
 
 data TypingError = UnificationError Type Type
                  | OccursCheck
-                 | UndefinedVar Text
+                 | UndefinedVar Ident
                  deriving (Show)
 
 type Typing = StateT TypingSt (Except TypingError)
@@ -97,6 +113,9 @@ data Function t = Function { fName   :: Ident
                            , fLocals :: M.HashMap Ident (Local t)
                            , fBody   :: Expr t }
 
+mkId :: Text -> Ident
+mkId x = Ident x Nothing Nothing
+
 sc :: Parser ()
 sc = L.space space1 (L.skipLineComment "--") (L.skipBlockComment "(--" "--)")
 
@@ -114,8 +133,8 @@ pIdent' = try $ do
   T.cons <$> (letterChar <|> char '_')
          <*> (takeWhileP Nothing $ \c -> c == '_' || isAlphaNum c)
 
-pIdent :: Parser Text
-pIdent = lexeme pIdent'
+pIdent :: Parser Ident
+pIdent = mkId <$> (lexeme pIdent')
 
 pInteger :: Parser Integer
 pInteger = lexeme L.decimal
@@ -125,8 +144,8 @@ pBuiltin = try $ do
   o <- getOffset
   x <- string "$$" *> pIdent
   case x of
-    "add" -> return BAdd
-    _     -> do
+    Ident "add" Nothing Nothing -> return BAdd
+    _                           -> do
       setOffset o
       customFailure $ InvalidBuiltin x
 
@@ -154,7 +173,7 @@ pExpr2 = do
         [] -> e
         _ -> ELet () bs e
   where
-    pBinding = (Binding ()) <$> (symbol "." *> pIdent) <*> (many pIdent) <*> (symbol "=" *> pExpr1)
+    pBinding = (Binding ()) <$> (symbol "." *> pIdent) <*> (many pIdent) <*> (return $ S.empty) <*> (symbol "=" *> pExpr1)
 
 pExpr :: Parser UExpr
 pExpr = pExpr2
@@ -163,7 +182,7 @@ pProgram :: Parser UProgram
 pProgram = Program <$> (sc *> pExpr <* eof)
 
 instance Typed Binding where
-  withType f x@(Binding t _ _ _) = f t x
+  withType f x@(Binding t _ _ _ _) = f t x
 
 instance Typed Expr where
   withType f x@(EInt t _) = f t x
@@ -207,16 +226,16 @@ fresh :: Typing Type
 fresh = TVar <$> fresh'
 
 tInt :: Type
-tInt = TCons "int" []
+tInt = TCons (mkId "int") []
 
 tFn :: [Type] -> Type -> Type
 tFn [] y = y
-tFn (t:ts) y = TCons "->" [t, tFn ts y]
+tFn (t:ts) y = TCons (mkId "->") [t, tFn ts y]
 
 instance Show Type where
   show (TVar x) = "'t" ++ show x
-  show (TCons "->" [x, y]) =  "(" ++ (show x) ++ " -> " ++ (show y) ++ ")"
-  show (TCons x ts) = "(" ++ (T.unpack x) ++ (intercalate " " $ map show ts) ++  ")"
+  show (TCons (Ident "->" Nothing Nothing) [x, y]) =  "(" ++ (show x) ++ " -> " ++ (show y) ++ ")"
+  show (TCons x ts) = "(" ++ (show x) ++ (intercalate " " $ map show ts) ++  ")"
 
 (=:=) :: TyVar -> Type -> Typing ()
 (=:=) x t' = do
@@ -230,7 +249,7 @@ instance Show Type where
     _ -> x' `unify` t
   modify (\s -> s { currentSubst = addSubst x t sub })
 
-intro :: Text -> Type -> Typing a -> Typing a
+intro :: Ident -> Type -> Typing a -> Typing a
 intro x t m = do
   st <- get
   let prevEnv = env st
@@ -239,7 +258,7 @@ intro x t m = do
   modify (\s -> s { env = prevEnv })
   return r
 
-getVar :: Text -> Typing Type
+getVar :: Ident -> Typing Type
 getVar x = do
   st <- get
   case M.lookup x $ env st of
@@ -285,10 +304,10 @@ infer p = runTyping (inferProgram p)
     inferBindings [] e bs' = do
       e' <- inferExpr e
       return (e', reverse bs')
-    inferBindings ((Binding _ x [] e0):bs) e1 bs' = do
+    inferBindings ((Binding _ x [] _ e0):bs) e1 bs' = do
       e0' <- inferExpr e0
       let t = typeOf e0'
-      intro x t $ inferBindings bs e1 ((Binding t x [] e0'):bs')
+      intro x t $ inferBindings bs e1 ((Binding t x [] S.empty e0'):bs')
     inferBindings _ _ _ = error $ "Bindings with parameters are not supported yet"
 
 
@@ -306,7 +325,7 @@ emitProgram (Program p) = T.concat
     emitExpr e = T.concat [ "/* ", T.pack (show $ typeOf e), " */", emitExpr' e ]
     emitExpr' :: TExpr -> Text
     emitExpr' (EInt _ x) = T.pack $ show x
-    emitExpr' (EIdent _ x) = x
+    emitExpr' (EIdent _ x) = T.pack $ show x
     emitExpr' (EApp _ (EBuiltin _ b) [x, y]) =
       case b of
         BAdd -> T.concat [ "(", emitExpr x, " + ", emitExpr y, ")" ]
@@ -316,13 +335,13 @@ emitProgram (Program p) = T.concat
       T.concat $ (map emitBinding bs) ++ [emitExpr e]
     emitExpr' x = error $ "Unsuported expression: " ++ (show x)
 
-    emitBinding (Binding t x [] e) =
-      T.concat [ emitType t, " ", x, " = ", emitExpr e, ";\n" ]
+    emitBinding (Binding t x [] _ e) =
+      T.concat [ emitType t, " ", T.pack (show x), " = ", emitExpr e, ";\n" ]
     emitBinding b = error $ "Unsupported binding: " ++ (show b)
 
     emitType :: Type -> Text
     emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
-    emitType (TCons "int" []) = "int"
+    emitType (TCons (Ident "int" Nothing Nothing) []) = "int"
     emitType t = error $ "Unsupported type: " ++ (show t)
 
 compileAndRun :: String -> IO ()

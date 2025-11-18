@@ -29,6 +29,7 @@ dependencies:
 - microlens-platform >= 0.4.3 && < 1
 - process
 - unordered-containers
+- hashable
 
 ghc-options:
 - -Wall

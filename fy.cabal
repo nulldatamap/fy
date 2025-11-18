@@ -36,6 +36,7 @@ library
   build-depends:
       base >=4.7 && <5
     , containers >=0.6 && <1
+    , hashable
     , megaparsec ==9.*
     , microlens-platform >=0.4.3 && <1
     , mtl ==2.*
@@ -58,6 +59,7 @@ executable fy-exe
       base >=4.7 && <5
     , containers >=0.6 && <1
     , fy
+    , hashable
     , megaparsec ==9.*
     , microlens-platform >=0.4.3 && <1
     , mtl ==2.*
@@ -81,6 +83,7 @@ test-suite fy-test
       base >=4.7 && <5
     , containers >=0.6 && <1
     , fy
+    , hashable
     , megaparsec ==9.*
     , microlens-platform >=0.4.3 && <1
     , mtl ==2.*

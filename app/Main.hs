@@ -85,6 +85,18 @@ type UExpr    = Expr ()
 type TProgram = Program Type
 type TExpr    = Expr Type
 
+data ValOrFun t = Val (Expr t) | Fun (Function t)
+
+data Local t = Local { lName :: Ident
+                     , lDeps :: Set Ident
+                     , lBody :: ValOrFun t }
+
+data Function t = Function { fName   :: Ident
+                           , fType   :: t
+                           , fArgs   :: [(Ident, t)]
+                           , fLocals :: M.HashMap Ident (Local t)
+                           , fBody   :: Expr t }
+
 sc :: Parser ()
 sc = L.space space1 (L.skipLineComment "--") (L.skipBlockComment "(--" "--)")
 

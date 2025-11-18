@@ -11,7 +11,6 @@ import qualified Data.Set as S
 import Data.Set (Set)
 import Data.List (intersperse, intercalate)
 import Data.Maybe (fromMaybe)
-import Data.Void
 import Data.Char
 import Control.Monad (when)
 import Control.Monad.State
@@ -22,7 +21,6 @@ import qualified Data.HashMap.Strict as M
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
-import Control.Monad.Combinators.Expr
 
 data CustomParseError = InvalidBuiltin Text
   deriving (Eq, Ord)
@@ -113,8 +111,7 @@ pInteger = lexeme L.decimal
 pBuiltin :: Parser Builtin
 pBuiltin = try $ do
   o <- getOffset
-  string "$$"
-  x <- pIdent
+  x <- string "$$" *> pIdent
   case x of
     "add" -> return BAdd
     _     -> do
@@ -172,7 +169,7 @@ instance FreeVars (Expr Type) where
 
 instance Substitutable Type where
     subst (Subst m) (TVar x) = fromMaybe (TVar x) $ M.lookup x m
-    subst s x = x
+    subst _ x = x
 
 instance Functor a => Substitutable (a Type) where
   subst s x = fmap (subst s) x
@@ -280,15 +277,16 @@ infer p = runTyping (inferProgram p)
       e0' <- inferExpr e0
       let t = typeOf e0'
       intro x t $ inferBindings bs e1 ((Binding t x [] e0'):bs')
+    inferBindings _ _ _ = error $ "Bindings with parameters are not supported yet"
 
 
 
 emitProgram :: TProgram -> Text
-emitProgram (Program x) = T.concat
+emitProgram (Program p) = T.concat
   [ "#include <stdio.h>\n\n\
     \int inc(int x) { return x + 1; }\n\n\
     \int main(int argc, const char** argv) {\n\
-    \  printf(\"Result: %d\\n\", ", emitExpr x ,");\n\
+    \  printf(\"Result: %d\\n\", ", emitExpr p ,");\n\
     \  return 0;\n\
     \}\n"]
   where

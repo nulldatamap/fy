@@ -1,6 +1,7 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving #-}
+{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Main (main) where
 
+import Prelude hiding (lookup)
 import GHC.Generics (Generic)
 import System.Exit
 import System.Environment
@@ -107,7 +108,8 @@ data NameEntry = NameEntry { neName  :: Ident
 
 type NameMap = M.HashMap Ident NameEntry
 
-data NamingSt = NamingSt { nstNext  :: Integer
+data NamingSt = NamingSt { nstNext  :: Int
+                         , nstDepth :: Int
                          , nstScope :: NameMap }
 
 data NamingError = UndefinedName Ident
@@ -126,6 +128,31 @@ data Function t = Function { fName   :: Ident
                            , fArgs   :: [(Ident, t)]
                            , fLocals :: M.HashMap Ident (Local t)
                            , fBody   :: Expr t }
+
+class (Hashable k, Monad m, MonadError e m) => Context m k v e
+    | m -> e, m -> k, m -> v where
+
+  getContext :: m (M.HashMap k v)
+  modifyContext :: (M.HashMap k v -> M.HashMap k v) -> m ()
+  undefinedVar :: k -> m a
+
+  lookup :: k -> m v
+  lookup k = do
+    v <- (M.lookup k) <$> getContext
+    case v of
+      Nothing -> undefinedVar k
+      Just x -> return x
+
+  insert :: k -> v -> m ()
+  insert k v = modifyContext (M.insert k v)
+
+  scoped :: k -> v -> m a -> m a
+  scoped k v m = do
+    oldCtx <- getContext
+    insert k v
+    r <- m
+    modifyContext (const oldCtx)
+    return r
 
 mkId :: Text -> Ident
 mkId x = Ident x Nothing Nothing
@@ -195,10 +222,15 @@ pExpr = pExpr2
 pProgram :: Parser UProgram
 pProgram = Program <$> (sc *> pExpr <* eof)
 
+instance Context Naming Ident NameEntry NamingError where
+  getContext = nstScope <$> get
+  modifyContext f = modify (\s -> s { nstScope = f $ nstScope s })
+  undefinedVar = throwError . UndefinedName
+
 runNaming :: NameMap -> Naming a -> Either NamingError a
 runNaming gs n = runExcept (evalStateT n st)
   where
-    st = NamingSt { nstNext = 0, nstScope = gs }
+    st = NamingSt { nstNext = 0, nstScope = gs, nstDepth = 0 }
 
 instance Typed Binding where
   withType f x@(Binding t _ _ _ _) = f t x
@@ -225,7 +257,9 @@ instance Functor a => Substitutable (a Type) where
   subst s x = fmap (subst s) x
 
 defaultTypingSt :: TypingSt
-defaultTypingSt = TypingSt { nextId = 0, currentSubst = Subst M.empty, env = M.empty }
+defaultTypingSt = TypingSt { nextId = 0
+                           , currentSubst = Subst M.empty
+                           , env = M.empty }
 
 addSubst :: TyVar -> Type -> Subst -> Subst
 addSubst x t (Subst s) = Subst $
@@ -268,21 +302,10 @@ instance Show Type where
     _ -> x' `unify` t
   modify (\s -> s { currentSubst = addSubst x t sub })
 
-intro :: Ident -> Type -> Typing a -> Typing a
-intro x t m = do
-  st <- get
-  let prevEnv = env st
-  modify (\s -> s { env = M.insert x t prevEnv })
-  r <- m
-  modify (\s -> s { env = prevEnv })
-  return r
-
-getVar :: Ident -> Typing Type
-getVar x = do
-  st <- get
-  case M.lookup x $ env st of
-    Nothing -> throwError $ UndefinedVar x
-    Just t -> return t
+instance Context Typing Ident Type TypingError where
+  getContext = env <$> get
+  modifyContext f = modify (\s -> s { env = f $ env s })
+  undefinedVar = throwError . UndefinedVar
 
 unify :: Type -> Type -> Typing ()
 unify (TVar x) y = x =:= y
@@ -304,7 +327,7 @@ infer p = runTyping (inferProgram p)
       return $ Program (subst (currentSubst st) e')
     inferExpr (EInt _ x) = return $ EInt tInt x
     inferExpr (EIdent _ x) = do
-      t <- getVar x
+      t <- lookup x
       return $ EIdent t x
     inferExpr (EBuiltin _ b) = do
       let t = case b of
@@ -326,7 +349,7 @@ infer p = runTyping (inferProgram p)
     inferBindings ((Binding _ x [] _ e0):bs) e1 bs' = do
       e0' <- inferExpr e0
       let t = typeOf e0'
-      intro x t $ inferBindings bs e1 ((Binding t x [] S.empty e0'):bs')
+      scoped x t $ inferBindings bs e1 ((Binding t x [] S.empty e0'):bs')
     inferBindings _ _ _ = error $ "Bindings with parameters are not supported yet"
 
 

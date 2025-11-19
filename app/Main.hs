@@ -101,6 +101,20 @@ type UExpr    = Expr ()
 type TProgram = Program Type
 type TExpr    = Expr Type
 
+data NameEntry = NameEntry { neName  :: Ident
+                           , neDepth :: Int
+                           , neDeps  :: Set Ident }
+
+type NameMap = M.HashMap Ident NameEntry
+
+data NamingSt = NamingSt { nstNext  :: Integer
+                         , nstScope :: NameMap }
+
+data NamingError = UndefinedName Ident
+                 | InvalidCapture Ident
+
+type Naming = StateT NamingSt (Except NamingError)
+
 data ValOrFun t = Val (Expr t) | Fun (Function t)
 
 data Local t = Local { lName :: Ident
@@ -180,6 +194,11 @@ pExpr = pExpr2
 
 pProgram :: Parser UProgram
 pProgram = Program <$> (sc *> pExpr <* eof)
+
+runNaming :: NameMap -> Naming a -> Either NamingError a
+runNaming gs n = runExcept (evalStateT n st)
+  where
+    st = NamingSt { nstNext = 0, nstScope = gs }
 
 instance Typed Binding where
   withType f x@(Binding t _ _ _ _) = f t x

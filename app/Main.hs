@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Main (main) where
 
-import Prelude hiding (lookup)
+import Prelude hiding (lookup, lines)
 import GHC.Generics (Generic)
 import System.Exit
 import System.Environment
@@ -21,6 +21,7 @@ import Debug.Trace (trace)
 import Control.Monad (when, foldM)
 import Control.Monad.State
 import Control.Monad.Except
+import Control.Monad.RWS
 import Data.Graph (stronglyConnComp, SCC(..))
 
 import qualified Data.HashMap.Strict as M
@@ -150,6 +151,10 @@ type TProgram  = Program Type
 type TExpr     = Expr Type
 type TFunction = Function Type
 
+type Identation = Int
+
+type Emitter a = RWS Identation [Text] () a
+
 class (Hashable k, Monad m, MonadError e m) => Context m k v e
     | m -> e, m -> k, m -> v where
 
@@ -189,8 +194,8 @@ lexeme = L.lexeme sc
 symbol :: Text -> Parser Text
 symbol = L.symbol sc
 
-parens :: Parser a -> Parser a
-parens = between (symbol "(") (symbol ")")
+pParens :: Parser a -> Parser a
+pParens = between (symbol "(") (symbol ")")
 
 pIdent' :: Parser Text
 pIdent' = try $ do
@@ -214,7 +219,7 @@ pBuiltin = try $ do
       customFailure $ InvalidBuiltin x
 
 pExpr0 :: Parser UExpr
-pExpr0 =  (parens pExpr)
+pExpr0 =  (pParens pExpr)
       <|> ((EInt ()) <$> pInteger)
       <|> ((EIdent ()) <$> pIdent)
       <|> ((EBuiltin ()) <$> pBuiltin)
@@ -512,58 +517,118 @@ infer f = runTyping (realize =<< inferFunction f)
 
 -- ======== Emitting
 
+runEmitter :: Emitter () -> Text
+runEmitter m = T.concat $ snd $ evalRWS m 0 ()
+
+indented :: Emitter a -> Emitter a
+indented m = local (+1) m
+
+indent :: Emitter ()
+indent = do
+  d <- ask
+  emit $ T.replicate d "  "
+
+line :: Text -> Emitter ()
+line l = tell [ l, "\n" ]
+
+lines :: [Text] -> Emitter ()
+lines ls = do
+  tell $ intersperse "\n" ls
+  tell ["\n"]
+
+around :: Text -> Text -> Emitter a -> Emitter a
+around o c m = do
+  emit o
+  r <- m
+  emit c
+  return r
+
+parens :: Emitter a -> Emitter a
+parens = around "(" ")"
+
+seperated :: Text -> (a -> Emitter ()) -> [a] -> Emitter ()
+seperated _ _ []  = return ()
+seperated _ f [x] = f x
+seperated sep f (x0:x1:xs) = (f x0) >> (emit sep) >> (seperated sep f (x1:xs))
+
+emit :: Text -> Emitter ()
+emit x = tell [ x ]
+
+braceBlock :: Emitter a -> Emitter a
+braceBlock m = do
+  line "{"
+  r <- indented m
+  line "}"
+  return r
+
 emitProgram :: TFunction -> Text
-emitProgram f = T.concat
-  [ "#include <stdio.h>\n\n\
-    \int inc(int x) { return x + 1; }\n\n"
-  , emitFunction f, "\n\
-    \int main(int argc, const char** argv) {\n\
-    \  printf(\"Result: %d\\n\", __fy_main());\n\
-    \  return 0;\n\
-    \}\n"]
-  where
-    emitFunction f =
-      let (argTs, retT) = case fType f of
-                              MonoType fty -> case unFn fty of
-                                                  Nothing -> error "Type of function isn't a arrow type!"
-                                                  Just x -> x
-                              PolyType _ _ -> error "Polymorphic functions are not supported"
-          args = T.concat $
-            intersperse ", " $
-              map (\(n, t) -> T.concat [ emitType t, " ", emitIdent n ]) $
-                filter (\(_, t) -> t /= tUnit) $ fArgs f
-          locals = T.concat $
-            map (\l ->
-                   case l of
-                     Local n (MonoType t) _ (Val e) -> T.concat [ "  ", emitType t, " ", emitIdent n, " = ", emitExpr e, ";\n" ]
-                     _ -> error $ "Invalid local: " ++ show l)
-                (M.elems $ fLocals f)
-      in T.concat [ emitType retT, " ", emitIdent $ fName f, "(", args, ") {\n"
-                  , locals, "\n"
-                  , "  return ", emitExpr $ fBody f, ";\n}\n\n" ]
-    emitExpr :: TExpr -> Text
-    emitExpr e = T.concat [ "/* ", T.pack (show $ typeOf e), " */", emitExpr' e ]
-    emitExpr' :: TExpr -> Text
-    emitExpr' (EInt _ x) = T.pack $ show x
-    emitExpr' (EIdent _ x) = emitIdent x
-    emitExpr' (EApp _ (EBuiltin _ b) [x, y]) =
-      case b of
-        BAdd -> T.concat [ "(", emitExpr x, " + ", emitExpr y, ")" ]
-    emitExpr' (EApp _ e es) =
-      T.concat $ [(emitExpr e), "("] ++ (intersperse ", " $ map emitExpr es) ++ [")"]
-    emitExpr' (ELet _ _ _) = error "Let expressions shouldn't exist at this point"
+emitProgram f = runEmitter $ do
+  lines [ "#include <stdio.h>\n"
+        , "int inc(int x) { return x + 1; }\n"
+        ]
+  emitFunction f
+  lines [ "int main(int argc, const char** argv) {"
+        , "  printf(\"Result: %d\\n\", __fy_main());"
+        , "  return 0;"
+        , "}" ]
 
-    emitIdent :: Ident -> Text
-    emitIdent (Ident n ns id) = T.pack $
-        (fromMaybe "" $ fmap ((\s -> "__" ++ s ++ "_") . T.unpack) ns)
-        ++ (T.unpack n)
-        ++ (fromMaybe "" $ fmap (('_':) . show) id)
+emitFunction  :: TFunction -> Emitter ()
+emitFunction f = do
+    let (argTs, retT) = case fType f of
+                            MonoType fty -> case unFn fty of
+                                                Nothing -> error "Type of function isn't a arrow type!"
+                                                Just x -> x
+                            PolyType _ _ -> error "Polymorphic functions are not supported"
+    emitType retT
+    emit " "
+    emitIdent $ fName f
+    parens $ do
+      let prms = filter ((/= tUnit) . snd) $ fArgs f
+      seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) prms
+    braceBlock $ do
+      mapM (\l ->
+              case l of
+                Local n (MonoType t) _ (Val e) -> do
+                  indent
+                  emitType t
+                  emit " "
+                  emitIdent n
+                  emit " = "
+                  emitExpr e
+                  line ";"
+                _ -> error $ "Invalid local: " ++ show l)
+           (M.elems $ fLocals f)
+      indent
+      emit "return"
+      emitExpr $ fBody f
+      line ";"
 
-    emitType :: Type -> Text
-    emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
-    emitType (TCons (Ident "int" Nothing Nothing) []) = "int"
-    emitType (TCons (Ident "()" Nothing Nothing) []) = "void"
-    emitType t = error $ "Unsupported type: " ++ (show t)
+emitExpr :: TExpr -> Emitter ()
+emitExpr e = do
+   tell ["/* ", T.pack (show $ typeOf e), " */"]
+   emitExpr' e
+emitExpr' :: TExpr -> Emitter ()
+emitExpr' (EInt _ x) = emit $ T.pack $ show x
+emitExpr' (EIdent _ x) = emitIdent x
+emitExpr' (EApp _ (EBuiltin _ b) [x, y]) =
+    case b of
+        BAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
+emitExpr' (EApp _ e es) = do
+  emitExpr e
+  parens $ seperated ", " emitExpr es
+emitExpr' (ELet _ _ _) = error "Let expressions shouldn't exist at this point"
+
+emitIdent :: Ident -> Emitter ()
+emitIdent (Ident n ns id) = do
+  mapM_ (\ns -> tell ["__", ns, "_"]) ns
+  emit n
+  mapM_ (\id -> tell ["_", T.pack $ show id]) id
+
+emitType :: Type -> Emitter ()
+emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
+emitType (TCons (Ident "int" Nothing Nothing) []) = emit "int"
+emitType (TCons (Ident "()" Nothing Nothing) []) = emit "void"
+emitType t = error $ "Unsupported type: " ++ (show t)
 
 compileAndRun :: String -> IO ()
 compileAndRun f = do

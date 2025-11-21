@@ -12,6 +12,8 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Set as S
 import Data.Hashable (Hashable)
 import Data.Set (Set)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import Data.List (intersperse, intercalate)
 import Data.Maybe (fromMaybe)
 import Data.Char
@@ -19,7 +21,7 @@ import Debug.Trace (trace)
 import Control.Monad (when, foldM)
 import Control.Monad.State
 import Control.Monad.Except
-import Data.Graph (stronglyConnComp)
+import Data.Graph (stronglyConnComp, SCC(..))
 
 import qualified Data.HashMap.Strict as M
 
@@ -82,9 +84,11 @@ data Type = TVar TyVar
           | TCons Ident [Type]
           deriving Eq
 
-data TypeScheme = MonoType Type
-                | PolyType [TyVar] Type
-                deriving Eq
+data TypeSchemeT t = MonoType t
+                  | PolyType [TyVar] t
+                  deriving Eq
+
+type TypeScheme = TypeSchemeT Type
 
 data Subst = Subst (M.HashMap Int Type)
 
@@ -97,6 +101,7 @@ data TypingSt = TypingSt { nextId       :: Int
 data TypingError = UnificationError Type Type
                  | OccursCheck
                  | UndefinedVar Ident
+                 | InvalidRecursion (NonEmpty Ident)
                  deriving (Show)
 
 type Typing = StateT TypingSt (Except TypingError)
@@ -116,7 +121,6 @@ data NamingSt = NamingSt { nstNext   :: Int
 
 data NamingError = UndefinedName Ident
                  | InvalidCapture Ident
-                 | InvalidRecursion Ident
   deriving Show
 
 type Naming = StateT NamingSt (Except NamingError)
@@ -125,12 +129,13 @@ data ValOrFun t = Val (Expr t) | Fun (Function t)
   deriving Show
 
 data Local t = Local { lName :: Ident
+                     , lType :: TypeSchemeT t
                      , lDeps :: Set Ident
                      , lBody :: ValOrFun t }
   deriving Show
 
 data Function t = Function { fName   :: Ident
-                           , fType   :: t
+                           , fType   :: TypeSchemeT t
                            , fArgs   :: [(Ident, t)]
                            , fLocals :: LocalMap t
                            , fDeps   :: Set Ident
@@ -267,7 +272,7 @@ addDeps x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
 
 addLocal :: Ident -> Set Ident -> ValOrFun () -> Naming (Local ())
 addLocal x ds b = do
-  let l = Local x ds b
+  let l = Local x (MonoType ()) ds b
   modify (\s -> s { nstLocals = M.insert x l $ nstLocals s })
   return l
 
@@ -308,10 +313,10 @@ checkExpr e =
 checkFunction :: Ident -> [Ident] -> UExpr -> Naming UFunction
 checkFunction f xs e = do
   (body, deps, locals) <- block (checkExpr e)
-  return $ Function f () (map (\x -> (x, ())) xs) locals deps body
+  return $ Function f (MonoType ()) (map (\x -> (x, ())) xs) locals deps body
 
 checkImplicitMain :: UExpr -> Naming UFunction
-checkImplicitMain e = checkFunction (mkId "___fy_main") [] e
+checkImplicitMain e = checkFunction (mkId "__fy_main") [] e
 
 -- ======== Typing
 
@@ -340,8 +345,27 @@ instance Substitutable Type where
     subst (Subst m) (TVar x) = fromMaybe (TVar x) $ M.lookup x m
     subst _ x = x
 
-instance Functor a => Substitutable (a Type) where
+instance Substitutable (Expr Type) where
   subst s x = fmap (subst s) x
+
+instance Substitutable TypeScheme where
+  subst s (MonoType t) = MonoType $ subst s t
+  -- ASSUMPTION: All the type variables are fresh and shouldn't exist in s
+  subst s (PolyType ts t) = PolyType ts $ subst s t
+
+instance Substitutable (ValOrFun Type) where
+  subst s (Val v) = Val $ subst s v
+  subst s (Fun f) = Fun $ subst s f
+
+instance Substitutable (Local Type) where
+  subst s l = l { lType = subst s $ lType l
+                , lBody = subst s $ lBody l }
+
+instance Substitutable TFunction  where
+  subst s f = f { fBody = subst s $ fBody f
+                , fType = subst s $ fType f
+                , fArgs = map (\(x, t) -> (x, subst s t)) $ fArgs f
+                , fLocals = M.map (subst s) $ fLocals f }
 
 defaultTypingSt :: TypingSt
 defaultTypingSt = TypingSt { nextId = 0
@@ -368,16 +392,26 @@ fresh = TVar <$> fresh'
 tInt :: Type
 tInt = TCons (mkId "int") []
 
+tUnit :: Type
+tUnit = TCons (mkId "()") []
+
 tFn :: [Type] -> Type -> Type
 tFn [] y = y
 tFn (t:ts) y = TCons (mkId "->") [t, tFn ts y]
+
+unFn :: Type -> Maybe ([Type], Type)
+unFn (TCons (Ident "->" Nothing Nothing) [x, y]) = Just $ helper [x] y
+  where
+    helper args (TCons (Ident "->" Nothing Nothing) [arg, tail]) = helper (arg:args) tail
+    helper args ret = (reverse args, ret)
+unFn _ = Nothing
 
 instance Show Type where
   show (TVar x) = "'t" ++ show x
   show (TCons (Ident "->" Nothing Nothing) [x, y]) =  "(" ++ (show x) ++ " -> " ++ (show y) ++ ")"
   show (TCons x ts) = "(" ++ (show x) ++ (intercalate " " $ map show ts) ++  ")"
 
-instance Show TypeScheme where
+instance Show a => Show (TypeSchemeT a)  where
   show (MonoType t) = show t
   show (PolyType ts t) = "forall " ++ (intercalate " " $ map (show . TVar) ts) ++ " . " ++ (show t)
 
@@ -432,21 +466,33 @@ generalize t = do
 runTyping :: Typing a -> Either TypingError a
 runTyping t = runExcept $ evalStateT t defaultTypingSt
 
--- infer :: UFunction -> Either TypingError TFunction
--- infer f = runTyping (inferFunction f)
---   where
---     inferFunction f = do
---       let sccs = stronglyConnComp map (\l -> (l, lName l, S.toList $ lDeps l)) $ fLocals f
---       (ls', e') <- inferWithSccLocals sscs $ fBody f
---       -- ....
-
-infer :: UProgram -> Either TypingError TProgram
-infer p = runTyping (inferProgram p)
+infer :: UFunction -> Either TypingError TFunction
+infer f = runTyping (realize =<< inferFunction f)
   where
-    inferProgram (Program e) = do
+    inferFunction f = do
+      let sccs = stronglyConnComp $ map (\l -> (l, lName l, S.toList $ lDeps l)) $ M.elems $ fLocals f
+      (ls', e') <- inferWithSccLocals sccs (fBody f) []
+      let retTy = tInt
+      unify (typeOf e') retTy
+      fty <- generalize $ tFn [tUnit] retTy
+      return $ Function { fName = fName f
+                        , fType = fty
+                        , fArgs = []
+                        , fLocals = M.fromList $ map (\l -> (lName l, l)) ls'
+                        , fDeps   = fDeps f
+                        , fBody   = e' }
+    inferWithSccLocals [] e ls' = do
       e' <- inferExpr e
-      st <- get
-      Program <$> realize e'
+      return (reverse ls', e')
+    inferWithSccLocals ((NECyclicSCC xs):ls) e ls' = throwError $ InvalidRecursion $ NE.map lName xs
+    inferWithSccLocals ((AcyclicSCC l):ls) e ls' = do
+      let e0 = case lBody l of
+                   Val e0 -> e0
+                   Fun _  -> error "Local functions are not supported yet"
+      e0' <- inferExpr e0
+      t <- realize $ typeOf e0'
+      t' <- generalize t
+      scoped [(lName l, t')] $ inferWithSccLocals ls e ((Local (lName l) t' (lDeps l) (Val e0')):ls')
     inferExpr (EInt _ x) = return $ EInt tInt x
     inferExpr (EIdent _ x) = do
       t <- lookup x >>= instanciate
@@ -461,53 +507,62 @@ infer p = runTyping (inferProgram p)
       rt <- fresh
       unify (typeOf f') (tFn (map typeOf xs') rt)
       return $ EApp rt f' xs'
-    inferExpr (ELet _ bs e) = do
-      (e', bs') <- inferBindings bs e []
-      return $ ELet (typeOf e') bs' e'
-
-    inferBindings [] e bs' = do
-      e' <- inferExpr e
-      return (e', reverse bs')
-    inferBindings ((Binding _ x [] _ e0):bs) e1 bs' = do
-      e0' <- inferExpr e0
-      t <- realize $ typeOf e0'
-      t' <- generalize t
-      scoped [(x, t')] $ inferBindings bs e1 ((Binding () x [] S.empty e0'):bs')
-    inferBindings _ _ _ = error $ "Bindings with parameters are not supported yet"
+    inferExpr (ELet _ bs e) = error "`let` expressions shouldn't exist at this point"
 
 
 -- ======== Emitting
 
-emitProgram :: TProgram -> Text
-emitProgram (Program p) = T.concat
+emitProgram :: TFunction -> Text
+emitProgram f = T.concat
   [ "#include <stdio.h>\n\n\
-    \int inc(int x) { return x + 1; }\n\n\
+    \int inc(int x) { return x + 1; }\n\n"
+  , emitFunction f, "\n\
     \int main(int argc, const char** argv) {\n\
-    \  printf(\"Result: %d\\n\", ", emitExpr p ,");\n\
+    \  printf(\"Result: %d\\n\", __fy_main());\n\
     \  return 0;\n\
     \}\n"]
   where
+    emitFunction f =
+      let (argTs, retT) = case fType f of
+                              MonoType fty -> case unFn fty of
+                                                  Nothing -> error "Type of function isn't a arrow type!"
+                                                  Just x -> x
+                              PolyType _ _ -> error "Polymorphic functions are not supported"
+          args = T.concat $
+            intersperse ", " $
+              map (\(n, t) -> T.concat [ emitType t, " ", emitIdent n ]) $
+                filter (\(_, t) -> t /= tUnit) $ fArgs f
+          locals = T.concat $
+            map (\l ->
+                   case l of
+                     Local n (MonoType t) _ (Val e) -> T.concat [ "  ", emitType t, " ", emitIdent n, " = ", emitExpr e, ";\n" ]
+                     _ -> error $ "Invalid local: " ++ show l)
+                (M.elems $ fLocals f)
+      in T.concat [ emitType retT, " ", emitIdent $ fName f, "(", args, ") {\n"
+                  , locals, "\n"
+                  , "  return ", emitExpr $ fBody f, ";\n}\n\n" ]
     emitExpr :: TExpr -> Text
     emitExpr e = T.concat [ "/* ", T.pack (show $ typeOf e), " */", emitExpr' e ]
     emitExpr' :: TExpr -> Text
     emitExpr' (EInt _ x) = T.pack $ show x
-    emitExpr' (EIdent _ x) = T.pack $ show x
+    emitExpr' (EIdent _ x) = emitIdent x
     emitExpr' (EApp _ (EBuiltin _ b) [x, y]) =
       case b of
         BAdd -> T.concat [ "(", emitExpr x, " + ", emitExpr y, ")" ]
     emitExpr' (EApp _ e es) =
       T.concat $ [(emitExpr e), "("] ++ (intersperse ", " $ map emitExpr es) ++ [")"]
-    emitExpr' (ELet _ bs e) =
-      T.concat $ (map emitBinding bs) ++ [emitExpr e]
-    emitExpr' x = error $ "Unsuported expression: " ++ (show x)
+    emitExpr' (ELet _ _ _) = error "Let expressions shouldn't exist at this point"
 
-    emitBinding (Binding t x [] _ e) =
-      T.concat [ "int ", T.pack (show x), " = ", emitExpr e, ";\n" ]
-    emitBinding b = error $ "Unsupported binding: " ++ (show b)
+    emitIdent :: Ident -> Text
+    emitIdent (Ident n ns id) = T.pack $
+        (fromMaybe "" $ fmap ((\s -> "__" ++ s ++ "_") . T.unpack) ns)
+        ++ (T.unpack n)
+        ++ (fromMaybe "" $ fmap (('_':) . show) id)
 
     emitType :: Type -> Text
     emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
     emitType (TCons (Ident "int" Nothing Nothing) []) = "int"
+    emitType (TCons (Ident "()" Nothing Nothing) []) = "void"
     emitType t = error $ "Unsupported type: " ++ (show t)
 
 compileAndRun :: String -> IO ()
@@ -519,14 +574,16 @@ compileAndRun f = do
       exitFailure
     Right ast' -> do
       let Program e = ast'
-      putStrLn $ show $ runNaming M.empty (checkImplicitMain e)
-      case infer ast' of
+      case runNaming M.empty (checkImplicitMain e) of
         Left err -> putStrLn $ show err
-        Right ast -> do
-            let outF = f ++ ".c"
-            let out = emitProgram ast
-            TIO.writeFile outF out
-            callProcess "tcc/tcc.exe" ["-I", "./tcc/include", "-run", outF]
+        Right fn ->
+            case infer fn of
+                Left err -> putStrLn $ show err
+                Right ast -> do
+                    let outF = f ++ ".c"
+                    let out = emitProgram ast
+                    TIO.writeFile outF out
+                    callProcess "tcc/tcc.exe" ["-I", "./tcc/include", "-run", outF]
 
 main :: IO ()
 main = do

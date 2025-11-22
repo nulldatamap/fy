@@ -1,5 +1,5 @@
 -- Test program:
-k y
+$$eq 11 (k 3)
 . x = $$add ($$add 1 1) ($$add 2 3)
 . y = $$add x w
 . w = (q . q = 3)

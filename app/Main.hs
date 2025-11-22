@@ -54,6 +54,7 @@ data Program t = Program (Expr t)
   deriving (Show, Functor)
 
 data Builtin = BAdd
+             | BEq
     deriving Show
 
 data Ident = Ident { idName :: Text
@@ -219,6 +220,7 @@ pBuiltin = try $ do
   x <- string "$$" *> pIdent
   case x of
     Ident "add" Nothing Nothing -> return BAdd
+    Ident "eq" Nothing Nothing  -> return BEq
     _                           -> do
       setOffset o
       customFailure $ InvalidBuiltin x
@@ -416,6 +418,9 @@ fresh = TVar <$> fresh'
 tInt :: Type
 tInt = TCons (mkId "int") []
 
+tBool :: Type
+tBool = TCons (mkId "bool") []
+
 tUnit :: Type
 tUnit = TCons (mkId "()") []
 
@@ -535,8 +540,9 @@ infer f = runTyping $ do
       t <- lookup x >>= instanciate
       return $ EIdent t x
     inferExpr (EBuiltin _ b) = do
-      let t = case b of
-            BAdd -> tFn [tInt, tInt] tInt
+      t <- case b of
+             BAdd -> return $ tFn [tInt, tInt] tInt
+             BEq  -> (\a -> tFn [a, a] tBool) <$> fresh
       return $ EBuiltin t b
     inferExpr (EApp _ f xs) = do
       f' <- inferExpr f
@@ -597,7 +603,9 @@ braceBlock m = do
 
 emitProgram :: TFunction -> Text
 emitProgram f = runEmitter $ do
-  lines [ "#include <stdio.h>\n"
+  lines [ "#include <stdio.h>"
+        , "#include <stdbool.h>"
+        , ""
         , "int inc(int x) { return x + 1; }\n"
         ]
   emitFunction f
@@ -651,6 +659,7 @@ emitExpr' (EIdent _ x) = emitIdent x
 emitExpr' (EApp _ (EBuiltin _ b) [x, y]) =
     case b of
         BAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
+        BEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
 emitExpr' (EApp _ e es) = do
   emitExpr e
   parens $ seperated ", " emitExpr es
@@ -665,6 +674,7 @@ emitIdent (Ident n ns id) = do
 emitType :: Type -> Emitter ()
 emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
 emitType (TCons (Ident "int" Nothing Nothing) []) = emit "int"
+emitType (TCons (Ident "bool" Nothing Nothing) []) = emit "bool"
 emitType (TCons (Ident "()" Nothing Nothing) []) = emit "void"
 emitType t = error $ "Unsupported type: " ++ (show t)
 

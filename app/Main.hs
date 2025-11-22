@@ -14,7 +14,7 @@ import Data.Hashable (Hashable)
 import Data.Set (Set)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate)
+import Data.List (intersperse, intercalate, partition)
 import Data.Maybe (fromMaybe)
 import Data.Char
 import Debug.Trace (trace)
@@ -92,6 +92,7 @@ data TypeSchemeT t = MonoType t
 type TypeScheme = TypeSchemeT Type
 
 data Subst = Subst (M.HashMap Int Type)
+  deriving (Show)
 
 type Env = M.HashMap Ident TypeScheme
 
@@ -138,7 +139,7 @@ data Local t = Local { lName :: Ident
 data Function t = Function { fName   :: Ident
                            , fType   :: TypeSchemeT t
                            , fArgs   :: [(Ident, t)]
-                           , fLocals :: LocalMap t
+                           , fLocals :: [Local t]
                            , fDeps   :: Set Ident
                            , fBody   :: Expr t }
   deriving Show
@@ -182,6 +183,10 @@ class (Hashable k, Monad m, MonadError e m) => Context m k v e
 
 mkId :: Text -> Ident
 mkId x = Ident x Nothing Nothing
+
+isFun :: ValOrFun t -> Bool
+isFun (Fun _) = True
+isFun _       = False
 
 -- ======== Parser
 
@@ -286,6 +291,14 @@ runNaming gs n = runExcept (evalStateT n st)
   where
     st = NamingSt { nstNext = 0, nstScope = gs, nstDepth = 0 }
 
+scopedVars :: [Ident] -> Naming a -> Naming ([Ident], a)
+scopedVars xs m = do
+    d <- nstDepth <$> get
+    xs' <- mapM uniqId xs
+    scoped (map (\(x, x') -> (x, NameEntry x' d)) $ zip xs xs') $ do
+      r <- m
+      return (xs', r)
+
 checkExpr :: UExpr -> Naming UExpr
 checkExpr e =
   case e of
@@ -302,23 +315,29 @@ checkExpr e =
   where
     checkBindings :: [Binding ()] -> UExpr -> Naming UExpr
     checkBindings bs e = do
-      xs' <- mapM (\(Binding () x _ _ _) -> ((,) x) <$> uniqId x) bs
-      d <- nstDepth <$> get
-      scoped (map (\(x, x') -> (x, NameEntry x' d)) xs') $ do
+      (_, e') <- scopedVars (map (\(Binding () x _ _ _) -> x) bs) $ do
         mapM_ checkBinding bs
         checkExpr e
+      return e'
     checkBinding (Binding () x [] _ e) = do
       (NameEntry x' _) <- lookup x
       (e', deps, lcl) <- block $ checkExpr e
       modify (\s -> s { nstLocals = M.union lcl $ nstLocals s })
       addLocal x' deps (Val e')
       return ()
-    checkBinding _ = error "Local functions are not supported"
+    checkBinding (Binding () x xs _ e) = do
+       (NameEntry x' _) <- lookup x
+       f <- checkFunction x' xs e
+       addLocal x' (fDeps f) (Fun f)
+       return ()
 
 checkFunction :: Ident -> [Ident] -> UExpr -> Naming UFunction
 checkFunction f xs e = do
-  (body, deps, locals) <- block (checkExpr e)
-  return $ Function f (MonoType ()) (map (\x -> (x, ())) xs) locals deps body
+  oldDepth <- nstDepth <$> get
+  modify (\s -> s { nstDepth = oldDepth + 1 })
+  (xs', (body, deps, locals)) <- scopedVars xs $ block (checkExpr e)
+  modify (\s -> s { nstDepth = oldDepth })
+  return $ Function f (MonoType ()) (map (\x -> (x, ())) xs') (M.elems locals) deps body
 
 checkImplicitMain :: UExpr -> Naming UFunction
 checkImplicitMain e = checkFunction (mkId "__fy_main") [] e
@@ -348,7 +367,7 @@ instance FreeVars Env where
 
 instance Substitutable Type where
     subst (Subst m) (TVar x) = fromMaybe (TVar x) $ M.lookup x m
-    subst _ x = x
+    subst s (TCons k ts) = TCons k $ map (subst s) ts
 
 instance Substitutable (Expr Type) where
   subst s x = fmap (subst s) x
@@ -370,7 +389,7 @@ instance Substitutable TFunction  where
   subst s f = f { fBody = subst s $ fBody f
                 , fType = subst s $ fType f
                 , fArgs = map (\(x, t) -> (x, subst s t)) $ fArgs f
-                , fLocals = M.map (subst s) $ fLocals f }
+                , fLocals = map (subst s) $ fLocals f }
 
 defaultTypingSt :: TypingSt
 defaultTypingSt = TypingSt { nextId = 0
@@ -379,7 +398,7 @@ defaultTypingSt = TypingSt { nextId = 0
 
 addSubst :: TyVar -> Type -> Subst -> Subst
 addSubst x t (Subst s) = Subst $
-  M.insert x t' s'
+  trace ("'t" ++ (show x) ++ " <- " ++ (show t)) $ M.insert x t' s'
   where
     t' = (Subst s) `subst` t
     s' = M.map (subst (Subst $ M.singleton  x t')) s
@@ -401,8 +420,8 @@ tUnit :: Type
 tUnit = TCons (mkId "()") []
 
 tFn :: [Type] -> Type -> Type
-tFn [] y = y
-tFn (t:ts) y = TCons (mkId "->") [t, tFn ts y]
+tFn [] y = TCons (mkId "->") [tUnit, y]
+tFn ts y = foldr (\t r -> TCons (mkId "->") [t, r]) y ts
 
 unFn :: Type -> Maybe ([Type], Type)
 unFn (TCons (Ident "->" Nothing Nothing) [x, y]) = Just $ helper [x] y
@@ -427,20 +446,24 @@ instance Show a => Show (TypeSchemeT a)  where
   let t = sub `subst` t'
   when (x `elem` (freeVars t)) $ throwError OccursCheck
   let x' = sub `subst` (TVar x)
+  let sub = currentSubst st
   case x' of
     TVar y | x == y -> return ()
     _ -> x' `unify` t
-  modify (\s -> s { currentSubst = addSubst x t sub })
+  modify (\s -> s { currentSubst = addSubst x t $ currentSubst s })
 
 instance Context Typing Ident TypeScheme TypingError where
   getContext = env <$> get
   modifyContext f = modify (\s -> s { env = f $ env s })
   undefinedVar = throwError . UndefinedVar
 
-unify :: Type -> Type -> Typing ()
-unify (TVar x) y = x =:= y
-unify x (TVar y) = y =:= x
-unify ty@(TCons x xs) tx@(TCons y ys) =
+unify x y =
+  trace ((show x) ++ " ~ " ++ (show y)) $ unify' x y
+
+unify' :: Type -> Type -> Typing ()
+unify' (TVar x) y = x =:= y
+unify' x (TVar y) = y =:= x
+unify' ty@(TCons x xs) tx@(TCons y ys) =
   if x == y && length xs == length ys
   then mapM_ (uncurry unify) $ zip xs ys
   else throwError $ UnificationError tx ty
@@ -463,27 +486,33 @@ generalize t = do
   let innerFrees = S.toList $ frees S.\\ outerFrees
   case innerFrees of
     [] -> return $ MonoType t
-    _  -> do
-        tyPrms <- mapM (const fresh') innerFrees
-        let t' = subst (Subst $ M.fromList $ zip innerFrees (map TVar tyPrms)) t
-        return $ PolyType tyPrms t'
+    _  -> return $ PolyType innerFrees t
 
 runTyping :: Typing a -> Either TypingError a
 runTyping t = runExcept $ evalStateT t defaultTypingSt
 
 infer :: UFunction -> Either TypingError TFunction
-infer f = runTyping (realize =<< inferFunction f)
+infer f = runTyping $ do
+    f' <- inferFunction f
+    mainTy <- (tFn []) <$> fresh
+    fty <- instanciate $ fType f'
+    unify mainTy fty
+    realize f'
   where
     inferFunction f = do
-      let sccs = stronglyConnComp $ map (\l -> (l, lName l, S.toList $ lDeps l)) $ M.elems $ fLocals f
-      (ls', e') <- inferWithSccLocals sccs (fBody f) []
-      let retTy = tInt
-      unify (typeOf e') retTy
-      fty <- generalize $ tFn [tUnit] retTy
-      return $ Function { fName = fName f
-                        , fType = fty
-                        , fArgs = []
-                        , fLocals = M.fromList $ map (\l -> (lName l, l)) ls'
+      let sccs = stronglyConnComp $ map (\l -> (l, lName l, S.toList $ lDeps l)) $ fLocals f
+      prmTys <- mapM (const fresh) $ trace (show $ fArgs f) $ fArgs f
+      let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
+      (ls', e') <- scoped prms $ inferWithSccLocals sccs (fBody f) []
+      retTy <- fresh
+      trace ("e: " ++ (show $ typeOf e') ++ "  retTy: " ++ (show retTy)) $ unify (typeOf e') retTy
+      fty <- realize $ tFn prmTys retTy
+      ss <- trace (":: " ++ (show fty)) $ currentSubst <$> get
+      fty' <- trace ("ss: " ++ (show ss) ++ "\ne: " ++ (show e')) $ generalize fty
+      realize $ Function { fName = fName f
+                        , fType = fty'
+                        , fArgs = zip (map fst $ fArgs f) prmTys
+                        , fLocals = ls'
                         , fDeps   = fDeps f
                         , fBody   = e' }
     inferWithSccLocals [] e ls' = do
@@ -491,13 +520,16 @@ infer f = runTyping (realize =<< inferFunction f)
       return (reverse ls', e')
     inferWithSccLocals ((NECyclicSCC xs):ls) e ls' = throwError $ InvalidRecursion $ NE.map lName xs
     inferWithSccLocals ((AcyclicSCC l):ls) e ls' = do
-      let e0 = case lBody l of
-                   Val e0 -> e0
-                   Fun _  -> error "Local functions are not supported yet"
-      e0' <- inferExpr e0
-      t <- realize $ typeOf e0'
-      t' <- generalize t
-      scoped [(lName l, t')] $ inferWithSccLocals ls e ((Local (lName l) t' (lDeps l) (Val e0')):ls')
+      (vof, t') <- case lBody l of
+          Val e0 -> do
+              e0' <- inferExpr e0
+              t <- realize $ typeOf e0'
+              t' <- generalize t
+              return (Val e0', t')
+          Fun f  -> do
+            f' <- inferFunction f
+            return (Fun f', fType f')
+      scoped [(lName l, t')] $ inferWithSccLocals ls e ((Local (lName l) t' (lDeps l) vof):ls')
     inferExpr (EInt _ x) = return $ EInt tInt x
     inferExpr (EIdent _ x) = do
       t <- lookup x >>= instanciate
@@ -556,8 +588,10 @@ emit x = tell [ x ]
 
 braceBlock :: Emitter a -> Emitter a
 braceBlock m = do
+  indent
   line "{"
   r <- indented m
+  indent
   line "}"
   return r
 
@@ -574,16 +608,19 @@ emitProgram f = runEmitter $ do
 
 emitFunction  :: TFunction -> Emitter ()
 emitFunction f = do
+    let (lFuns, lVars) = partition (\(Local _ _ _ k) -> isFun k) $ fLocals f
+    mapM_ (\(Local _ _ _ (Fun f)) -> emitFunction f) lFuns
     let (argTs, retT) = case fType f of
                             MonoType fty -> case unFn fty of
                                                 Nothing -> error "Type of function isn't a arrow type!"
                                                 Just x -> x
-                            PolyType _ _ -> error "Polymorphic functions are not supported"
+                            PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
+    indent
     emitType retT
     emit " "
     emitIdent $ fName f
     parens $ do
-      let prms = filter ((/= tUnit) . snd) $ fArgs f
+      let prms = filter ((/= tUnit) . snd) $ trace (show $ fArgs f) $ fArgs f
       seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) prms
     braceBlock $ do
       mapM (\l ->
@@ -596,16 +633,17 @@ emitFunction f = do
                   emit " = "
                   emitExpr e
                   line ";"
-                _ -> error $ "Invalid local: " ++ show l)
-           (M.elems $ fLocals f)
+                Local _ _ _ (Fun f) -> emitFunction f)
+           lVars
       indent
-      emit "return"
+      emit "return "
       emitExpr $ fBody f
       line ";"
+    emit "\n"
 
 emitExpr :: TExpr -> Emitter ()
 emitExpr e = do
-   tell ["/* ", T.pack (show $ typeOf e), " */"]
+   -- tell ["/* ", T.pack (show $ typeOf e), " */"]
    emitExpr' e
 emitExpr' :: TExpr -> Emitter ()
 emitExpr' (EInt _ x) = emit $ T.pack $ show x

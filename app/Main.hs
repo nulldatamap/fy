@@ -31,11 +31,14 @@ import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 
 data CustomParseError = InvalidBuiltin Ident
+                      | ReservedName Ident
   deriving (Eq, Ord)
 
 instance ShowErrorComponent CustomParseError where
   showErrorComponent (InvalidBuiltin b) =
     "`$$" ++ (show b) ++ "` is not a valid builtin"
+  showErrorComponent (ReservedName x) =
+    "`" ++ (show x) ++ "` is not a valid indetifier, becasue it's a reserved keyword"
 
 type Parser = Parsec CustomParseError Text
 
@@ -78,6 +81,7 @@ data Expr t = EInt t Integer
             | EIdent t Ident
             | EApp t (Expr t) [Expr t]
             | ELet t [Binding t] (Expr t)
+            | EIf t (Expr t) (Expr t) (Expr t)
     deriving (Show, Functor, Foldable)
 
 type TyVar = Int
@@ -203,16 +207,25 @@ symbol = L.symbol sc
 pParens :: Parser a -> Parser a
 pParens = between (symbol "(") (symbol ")")
 
+keywords :: [Text]
+keywords = ["if", "then", "else"]
+
 pIdent' :: Parser Text
 pIdent' = try $ do
-  T.cons <$> (letterChar <|> char '_')
-         <*> (takeWhileP Nothing $ \c -> c == '_' || isAlphaNum c)
+  o <- getOffset
+  x <- T.cons <$> (letterChar <|> char '_')
+              <*> (takeWhileP Nothing $ \c -> c == '_' || isAlphaNum c)
+  if x `elem` keywords
+  then do
+      setOffset o
+      customFailure $ ReservedName $ mkId x
+  else return x
 
 pIdent :: Parser Ident
 pIdent = mkId <$> (lexeme pIdent')
 
 pInteger :: Parser Integer
-pInteger = lexeme L.decimal
+pInteger = lexeme $ L.signed (return ()) L.decimal
 
 pBuiltin :: Parser Builtin
 pBuiltin = try $ do
@@ -227,9 +240,12 @@ pBuiltin = try $ do
 
 pExpr0 :: Parser UExpr
 pExpr0 =  (pParens pExpr)
-      <|> ((EInt ()) <$> pInteger)
-      <|> ((EIdent ()) <$> pIdent)
+      <|> ((EInt ())     <$> pInteger)
+      <|> ((EIdent ())   <$> pIdent)
       <|> ((EBuiltin ()) <$> pBuiltin)
+      <|> ((EIf ()) <$> ((symbol "if")   *> pExpr1)
+                    <*> ((symbol "then") *> pExpr1)
+                    <*> ((symbol "else"  *> pExpr1)))
 
 pExpr1 :: Parser UExpr
 pExpr1 = do
@@ -313,6 +329,11 @@ checkExpr e =
       else return $ EIdent () (neName ne)
     EApp () f xs -> (EApp ()) <$> (checkExpr f) <*> (mapM checkExpr xs)
     ELet () bs e -> checkBindings bs e
+    EIf () e0 e1 e2 -> do
+       e0' <- checkExpr e0
+       e1' <- checkExpr e1
+       e2' <- checkExpr e2
+       return $ EIf () e0' e1' e2'
     _ -> return e
   where
     checkBindings :: [Binding ()] -> UExpr -> Naming UExpr
@@ -352,6 +373,7 @@ instance Typed Expr where
   withType f x@(EBuiltin t _) = f t x
   withType f x@(EApp t _ _) = f t x
   withType f x@(ELet t _ _) = f t x
+  withType f x@(EIf t _ _ _) = f t x
 
 instance FreeVars Type where
     freeVars (TVar x) = S.singleton x
@@ -546,6 +568,13 @@ infer f = runTyping $ do
       rt <- fresh
       unify (typeOf f') (tFn (map typeOf xs') rt)
       return $ EApp rt f' xs'
+    inferExpr (EIf _ e0 e1 e2) = do
+      e0' <- inferExpr e0
+      e1' <- inferExpr e1
+      e2' <- inferExpr e2
+      unify (typeOf e0') tBool
+      unify (typeOf e1') (typeOf e2')
+      return $ EIf (typeOf e1') e0' e1' e2'
     inferExpr (ELet _ bs e) = error "`let` expressions shouldn't exist at this point"
 
 
@@ -659,6 +688,13 @@ emitExpr' (EApp _ (EBuiltin _ b) [x, y]) =
 emitExpr' (EApp _ e es) = do
   emitExpr e
   parens $ seperated ", " emitExpr es
+emitExpr' (EIf _ e0 e1 e2) = do
+  parens $ do
+    emitExpr e0
+    emit " ? "
+    emitExpr e1
+    emit " : "
+    emitExpr e2
 emitExpr' (ELet _ _ _) = error "Let expressions shouldn't exist at this point"
 
 emitIdent :: Ident -> Emitter ()

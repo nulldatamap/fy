@@ -1,5 +1,7 @@
 -- Test program:
-$$eq 11 (k 3)
+if $$eq 11 (k 3)
+then -3
+else 2
 . x = $$add ($$add 1 1) ($$add 2 3)
 . y = $$add x w
 . w = (q . q = 3)

@@ -400,7 +400,7 @@ defaultTypingSt = TypingSt { nextId = 0
 
 addSubst :: TyVar -> Type -> Subst -> Subst
 addSubst x t (Subst s) = Subst $
-  trace ("'t" ++ (show x) ++ " <- " ++ (show t)) $ M.insert x t' s'
+  M.insert x t' s'
   where
     t' = (Subst s) `subst` t
     s' = M.map (subst (Subst $ M.singleton  x t')) s
@@ -462,13 +462,10 @@ instance Context Typing Ident TypeScheme TypingError where
   modifyContext f = modify (\s -> s { env = f $ env s })
   undefinedVar = throwError . UndefinedVar
 
-unify x y =
-  trace ((show x) ++ " ~ " ++ (show y)) $ unify' x y
-
-unify' :: Type -> Type -> Typing ()
-unify' (TVar x) y = x =:= y
-unify' x (TVar y) = y =:= x
-unify' ty@(TCons x xs) tx@(TCons y ys) =
+unify :: Type -> Type -> Typing ()
+unify (TVar x) y = x =:= y
+unify x (TVar y) = y =:= x
+unify ty@(TCons x xs) tx@(TCons y ys) =
   if x == y && length xs == length ys
   then mapM_ (uncurry unify) $ zip xs ys
   else throwError $ UnificationError tx ty
@@ -506,14 +503,13 @@ infer f = runTyping $ do
   where
     inferFunction f = do
       let sccs = stronglyConnComp $ map (\l -> (l, lName l, S.toList $ lDeps l)) $ fLocals f
-      prmTys <- mapM (const fresh) $ trace (show $ fArgs f) $ fArgs f
+      prmTys <- mapM (const fresh) $ fArgs f
       let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
       (ls', e') <- scoped prms $ inferWithSccLocals sccs (fBody f) []
       retTy <- fresh
-      trace ("e: " ++ (show $ typeOf e') ++ "  retTy: " ++ (show retTy)) $ unify (typeOf e') retTy
+      unify (typeOf e') retTy
       fty <- realize $ tFn prmTys retTy
-      ss <- trace (":: " ++ (show fty)) $ currentSubst <$> get
-      fty' <- trace ("ss: " ++ (show ss) ++ "\ne: " ++ (show e')) $ generalize fty
+      fty' <- generalize fty
       realize $ Function { fName = fName f
                         , fType = fty'
                         , fArgs = zip (map fst $ fArgs f) prmTys
@@ -628,7 +624,7 @@ emitFunction f = do
     emit " "
     emitIdent $ fName f
     parens $ do
-      let prms = filter ((/= tUnit) . snd) $ trace (show $ fArgs f) $ fArgs f
+      let prms = filter ((/= tUnit) . snd) $ fArgs f
       seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) prms
     braceBlock $ do
       mapM (\l ->

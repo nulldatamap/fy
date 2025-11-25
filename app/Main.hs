@@ -161,6 +161,37 @@ type Identation = Int
 
 type Emitter a = RWS Identation [Text] () a
 
+data Operator = OpAdd
+              | OpEq
+              deriving (Show, Eq)
+
+type IRType = Type
+
+data IRExpr = IRVar Ident
+            | IROp Operator
+            | IRCall Ident [IRExpr]
+            deriving (Show)
+
+data IRStmt = IRDef IRType Ident (Maybe IRExpr)
+            | IRSet Ident IRExpr
+            | IREval IRExpr
+            | IRReturn IRExpr
+            | IRIf IRExpr [IRStmt] [IRStmt]
+            deriving (Show)
+
+data IRFunc = IRFunc { irfName  :: Ident
+                     , irfRetTy :: IRType
+                     , irfArgs  :: [(IRType, Ident)]
+                     , irfBody  :: [IRStmt] }
+
+data IRProgram = IRProgram { irpFuncs :: [IRFunc] }
+
+data LoweringSt = LoweringSt { lstNext  :: Int
+                             , lstFuncs :: [IRFunc]
+                             , lstFuncInsts :: M.HashMap (Ident, [Type]) IRFunc }
+
+type Lowering = RWS () [IRStmt] LoweringSt
+
 class (Hashable k, Monad m, MonadError e m) => Context m k v e
     | m -> e, m -> k, m -> v where
 
@@ -168,9 +199,12 @@ class (Hashable k, Monad m, MonadError e m) => Context m k v e
   modifyContext :: (M.HashMap k v -> M.HashMap k v) -> m ()
   undefinedVar :: k -> m a
 
+  tryLookup :: k -> m (Maybe v)
+  tryLookup k = (M.lookup k) <$> getContext
+
   lookup :: k -> m v
   lookup k = do
-    v <- (M.lookup k) <$> getContext
+    v <- tryLookup k
     case v of
       Nothing -> undefinedVar k
       Just x -> return x
@@ -578,6 +612,36 @@ infer f = runTyping $ do
     inferExpr (ELet _ bs e) = error "`let` expressions shouldn't exist at this point"
 
 
+-- ======== Lowering
+
+-- runLowering :: Lowering a -> a
+-- runLowering m = fst $ evalRWS m () $
+--   LoweringSt { lstNext  = 0
+--              , lstFuncs = []
+--              , lstFuncInsts = M.empty }
+
+-- newVar' :: (Maybe Text) -> Lowering Ident
+-- newVar' t = do
+--   s <- get
+--   let x = lstNext s
+--   modify (\s -> s { lstNext = x + 1 } )
+--   return $ Ident (fromMaybe "__" t) Nothing (Just x)
+
+-- newVar :: Lowering Ident
+-- newVar = newVar' Nothing
+
+-- lowerFunction :: TFunction -> Lowering IRFunc
+-- lowerFunction f = do
+--   let (lFuns, lVars) = partition (\(Local _ _ _ k) -> isFun k) $ fLocals f
+--   mapM_ (\(Local _ _ _ (Fun f0)) -> lowerFunction f0) lFuns
+--     -- TODO
+
+-- lowerProgram :: TFunction -> Lowering IRProgram
+-- lowerProgram f = do
+--   lowerFunction f
+--   fs <- lstFuncs <$> get
+--   return $ IRProgram { irpFuncs = fs }
+
 -- ======== Emitting
 
 runEmitter :: Emitter () -> Text
@@ -728,7 +792,7 @@ compileAndRun f = do
                     let outF = f ++ ".c"
                     let out = emitProgram ast
                     TIO.writeFile outF out
-                    callProcess "tcc/tcc.exe" ["-I", "./tcc/include", "-run", outF]
+                    callProcess "tcc/tcc.exe" ["-I", "./tcc/include", outF]
 
 main :: IO ()
 main = do

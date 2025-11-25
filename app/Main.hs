@@ -162,9 +162,14 @@ data Operator = OpAdd
 
 type IRType = Type
 
+data IRLit = IRInt Integer
+           | IRVoid
+           deriving (Show)
+
 data IRExpr = IRVar Ident
-            | IROp Operator
+            | IROp Operator [IRExpr]
             | IRCall Ident [IRExpr]
+            | IRLit IRLit
             deriving (Show)
 
 data IRStmt = IRDef IRType Ident (Maybe IRExpr)
@@ -608,51 +613,91 @@ infer f = runTyping $ do
 
 -- ======== Lowering
 
--- runLowering :: Lowering a -> a
--- runLowering m = fst $ evalRWS m () $
---   LoweringSt { lstNext  = 0
---              , lstFuncs = []
---              , lstFuncInsts = M.empty }
+runLowering :: Lowering a -> a
+runLowering m = fst $ evalRWS m () $
+  LoweringSt { lstNext  = 0
+             , lstFuncs = []
+             , lstFuncInsts = M.empty }
 
--- newVar' :: (Maybe Text) -> Lowering Ident
--- newVar' t = do
---   s <- get
---   let x = lstNext s
---   modify (\s -> s { lstNext = x + 1 } )
---   return $ Ident (fromMaybe "__" t) Nothing (Just x)
+newVar' :: (Maybe Text) -> Lowering Ident
+newVar' t = do
+  s <- get
+  let x = lstNext s
+  modify (\s -> s { lstNext = x + 1 } )
+  return $ Ident (fromMaybe "__" t) Nothing (Just x)
 
--- newVar :: Lowering Ident
--- newVar = newVar' Nothing
+newVar :: Lowering Ident
+newVar = newVar' Nothing
 
--- -- lowerExpr :: TExpr -> Lowering ()
--- -- lowerExpr e =
--- --   case e of
--- --     EInt _ i ->
+lowerLocal :: Local Type -> Lowering ()
+lowerLocal l@(Local t x _ (Val e)) = do
+  e' <- lowerExpr e
+  case t of
+    MonoType t -> tell $ [ IRDef t x (Just e') ]
+    _ -> error $ "Can't lower a polytype local: " ++ (show l)
+lowerLocal (Local t x _ (Fun f)) = do
+  f' <- lowerFunction f
+  return ()
 
--- lowerBody :: TExpr -> Lowering ()
--- lowerBody b = do
---   r <- lowerExpr
+lowerExpr :: TExpr -> Lowering IRExpr
+lowerExpr e =
+  case e of
+    EInt _ i -> return $ IRLit $ IRInt i
+    EBuiltin t b -> error $ "Bare operatior: " ++ (show e)
+    EIdent _ x -> return $ IRVar x
+    EApp t (EBuiltin bt b) xs -> do
+      xs' <- mapM lowerExpr xs
+      let o = case b of
+                BAdd -> OpAdd
+                BEq  -> OpEq
+      return $ IROp o xs'
+    EApp t f xs -> do
+      f' <- lowerExpr f
+      xs' <- mapM lowerExpr xs
+      case f' of
+        IRVar fx -> return $ IRCall fx xs'
+        _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show $ EApp t f xs)
+    ELet t ls e -> do
+      mapM_ lowerLocal ls
+      lowerExpr e
+    EIf t e0 e1 e2 -> do
+      r <- newVar' (Just "_phi")
+      e0' <- lowerExpr e0
+      (_, sts1) <- listen $ do
+        e1' <- lowerExpr e1
+        tell [ IRSet r e1' ]
+      (_, sts2) <- listen $ do
+        e2' <- lowerExpr e1
+        tell [ IRSet r e2' ]
+      tell [ IRIf e0' sts1 sts2 ]
+      return $ IRVar r
 
--- lowerFunction :: TFunction -> Lowering IRFunc
--- lowerFunction f = do
---   let (lFuns, lVars) = partition (\(Local _ _ _ k) -> isFun k) $ fLocals f
---   mapM_ (\(Local _ _ _ (Fun f0)) -> lowerFunction f0) lFuns
---   let (argTs, retT) = case fType f of
---                         MonoType fty -> case unFn fty of
---                                           Nothing -> error "Type of function isn't a arrow type!"
---                                           Just x -> x
---                         PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
---   (_, body) <- listen $ lowerBody $ fBody f
---   return $ IRFunc { irfName  = fName f
---                   , irfRetTy = retT
---                   , irfArgs  = fArgs f
---                   , irfBody  = body }
+lowerBody :: TExpr -> Lowering ()
+lowerBody b = do
+  r <- lowerExpr b
+  tell [ IRReturn r ]
 
--- lowerProgram :: TFunction -> Lowering IRProgram
--- lowerProgram f = do
---   lowerFunction f
---   fs <- lstFuncs <$> get
---   return $ IRProgram { irpFuncs = fs }
+lowerFunction :: TFunction -> Lowering IRFunc
+lowerFunction f = do
+  let (argTs, retT) = case fType f of
+                        MonoType fty -> case unFn fty of
+                                          Nothing -> error "Type of function isn't a arrow type!"
+                                          Just x -> x
+                        PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
+  (_, body) <- listen $ lowerBody $ fBody f
+  let f' = IRFunc { irfName  = fName f
+                  , irfRetTy = retT
+                  , irfArgs  = fArgs f
+                  , irfBody  = body }
+  modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
+  return f'
+
+
+lowerProgram :: TFunction -> Lowering IRProgram
+lowerProgram f = do
+  lowerFunction f
+  fs <- lstFuncs <$> get
+  return $ IRProgram { irpFuncs = reverse fs }
 
 -- ======== Emitting
 
@@ -802,8 +847,7 @@ compileAndRun f = do
             case infer fn of
                 Left err -> putStrLn $ show err
                 Right ast -> do
-                    putStrLn $ show ast
-                    -- putStrLn $ show $ runLowering $ lowerProgram ast
+                    putStrLn $ show $ runLowering $ lowerProgram ast
                     let outF = f ++ ".c"
                     let out = emitProgram ast
                     TIO.writeFile outF out

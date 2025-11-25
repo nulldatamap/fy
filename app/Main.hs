@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Main (main) where
 
+import Debug.Trace (trace, traceStack)
+import GHC.Stack (HasCallStack, prettyCallStack, callStack)
+
 import Prelude hiding (lookup, lines)
 import GHC.Generics (Generic)
 import System.Exit
@@ -17,7 +20,6 @@ import qualified Data.List.NonEmpty as NE
 import Data.List (intersperse, intercalate, partition)
 import Data.Maybe (fromMaybe)
 import Data.Char
-import Debug.Trace (trace)
 import Control.Monad (when, foldM)
 import Control.Monad.State
 import Control.Monad.Except
@@ -102,7 +104,9 @@ type TyVar = Int
 
 data Type = TVar TyVar
           | TCons Ident [Type]
-          deriving Eq
+          deriving (Eq, Generic)
+
+deriving instance Hashable Type
 
 data TypeSchemeT t = MonoType t
                   | PolyType [TyVar] t
@@ -190,7 +194,8 @@ data IRProgram = IRProgram { irpFuncs :: [IRFunc] }
 
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
-                             , lstFuncInsts :: M.HashMap (Ident, [Type]) IRFunc }
+                             , lstKnownFuncs :: M.HashMap Ident TFunction
+                             , lstFuncInsts :: M.HashMap (Ident, Type) IRFunc }
 
 type Lowering = RWS () [IRStmt] LoweringSt
 
@@ -617,7 +622,9 @@ runLowering :: Lowering a -> a
 runLowering m = fst $ evalRWS m () $
   LoweringSt { lstNext  = 0
              , lstFuncs = []
-             , lstFuncInsts = M.empty }
+             , lstFuncInsts = M.empty
+             , lstKnownFuncs = M.empty
+             }
 
 newVar' :: (Maybe Text) -> Lowering Ident
 newVar' t = do
@@ -635,9 +642,11 @@ lowerLocal l@(Local t x _ (Val e)) = do
   case t of
     MonoType t -> tell $ [ IRDef t x (Just e') ]
     _ -> error $ "Can't lower a polytype local: " ++ (show l)
-lowerLocal (Local t x _ (Fun f)) = do
-  f' <- lowerFunction f
-  return ()
+lowerLocal (Local _ x _ (Fun f)) =
+  modify (\s -> s { lstKnownFuncs = M.insert x f (lstKnownFuncs s) } )
+
+stmts :: Lowering a -> Lowering (a, [IRStmt])
+stmts m = censor (const []) $ listen m
 
 lowerExpr :: TExpr -> Lowering IRExpr
 lowerExpr e =
@@ -655,19 +664,22 @@ lowerExpr e =
       f' <- lowerExpr f
       xs' <- mapM lowerExpr xs
       case f' of
-        IRVar fx -> return $ IRCall fx xs'
+        IRVar fx -> do
+          fx' <- instanciateFunc fx (typeOf f)
+          return $ IRCall fx' xs'
         _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show $ EApp t f xs)
     ELet t ls e -> do
       mapM_ lowerLocal ls
       lowerExpr e
     EIf t e0 e1 e2 -> do
       r <- newVar' (Just "_phi")
+      tell [ IRDef t r Nothing ]
       e0' <- lowerExpr e0
-      (_, sts1) <- listen $ do
+      (_, sts1) <- stmts $ do
         e1' <- lowerExpr e1
         tell [ IRSet r e1' ]
-      (_, sts2) <- listen $ do
-        e2' <- lowerExpr e1
+      (_, sts2) <- stmts $ do
+        e2' <- lowerExpr e2
         tell [ IRSet r e2' ]
       tell [ IRIf e0' sts1 sts2 ]
       return $ IRVar r
@@ -677,6 +689,46 @@ lowerBody b = do
   r <- lowerExpr b
   tell [ IRReturn r ]
 
+instanciateFunc :: Ident -> Type -> Lowering Ident
+instanciateFunc fx ft = do
+  let (tArgs, tRet) = case unFn ft of
+                        Nothing -> error $ "Non-function type as function head: " ++ (show fx) ++ " : " ++ (show ft)
+                        Just r -> r
+
+  st <- get
+  case M.lookup (fx, ft) (lstFuncInsts st) of
+    Just f -> return $ irfName f
+    Nothing -> do
+        let f = case M.lookup fx (lstKnownFuncs st) of
+                    Nothing -> error $ "Tried to instanciate unknown function: " ++ (show fx)
+                    Just f -> f
+        case fType f of
+          MonoType _ -> do
+            f' <- lowerFunction f
+            let fx' = irfName f'
+            modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
+            return fx'
+          PolyType txs rft -> do
+            let mF' = runTyping $ do
+                        unify rft ft
+                        realize $ f { fType = MonoType ft }
+            case mF' of
+              Left err -> error $ "Failed to instanciate "
+                ++ (show fx) ++ " as " ++ (show ft)
+                ++ ": " ++ (show err)
+              Right f' -> do
+                fx' <- refreshName $ fName f'
+                f' <- lowerFunction $ f' { fName = fx' }
+                modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
+                return fx'
+  where
+    refreshName (Ident x ns i) = do
+      let x' = case i of
+                Nothing -> x
+                Just i -> T.concat [ x, "_", (T.pack $ show i), "_inst__" ]
+      (Ident _ _ i') <- newVar
+      return $ Ident x' ns i'
+
 lowerFunction :: TFunction -> Lowering IRFunc
 lowerFunction f = do
   let (argTs, retT) = case fType f of
@@ -684,7 +736,7 @@ lowerFunction f = do
                                           Nothing -> error "Type of function isn't a arrow type!"
                                           Just x -> x
                         PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
-  (_, body) <- listen $ lowerBody $ fBody f
+  (_, body) <- stmts $ lowerBody $ fBody f
   let f' = IRFunc { irfName  = fName f
                   , irfRetTy = retT
                   , irfArgs  = fArgs f
@@ -747,77 +799,68 @@ braceBlock m = do
   line "}"
   return r
 
-emitProgram :: TFunction -> Text
-emitProgram f = runEmitter $ do
+emitProgram :: IRProgram -> Text
+emitProgram p = runEmitter $ do
   lines [ "#include <stdio.h>"
         , "#include <stdbool.h>"
         , ""
         , "int inc(int x) { return x + 1; }\n"
         ]
-  emitFunction f
+  mapM_ emitFunction $ irpFuncs p
   lines [ "int main(int argc, const char** argv) {"
         , "  printf(\"Result: %d\\n\", __fy_main());"
         , "  return 0;"
         , "}" ]
 
-emitFunction  :: TFunction -> Emitter ()
+emitFunction  :: IRFunc -> Emitter ()
 emitFunction f = do
-    let (argTs, retT) = case fType f of
-                            MonoType fty -> case unFn fty of
-                                                Nothing -> error "Type of function isn't a arrow type!"
-                                                Just x -> x
-                            PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
     indent
-    emitType retT
+    emitType $ irfRetTy f
     emit " "
-    emitIdent $ fName f
+    emitIdent $ irfName f
     parens $ do
-      let prms = filter ((/= tUnit) . snd) $ fArgs f
+      let prms = filter ((/= tUnit) . snd) $ irfArgs f
       seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) prms
     braceBlock $ do
-      indent
-      emit "return "
-      emitExpr $ fBody f
-      line ";"
+      emitStmts $ irfBody f
     emit "\n"
 
-emitExpr :: TExpr -> Emitter ()
-emitExpr e = do
-   -- tell ["/* ", T.pack (show $ typeOf e), " */"]
-   emitExpr' e
-emitExpr' :: TExpr -> Emitter ()
-emitExpr' (EInt _ x) = emit $ T.pack $ show x
-emitExpr' (EIdent _ x) = emitIdent x
-emitExpr' (EApp _ (EBuiltin _ b) [x, y]) =
-    case b of
-        BAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
-        BEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
-emitExpr' (EApp _ e es) = do
-  emitExpr e
-  parens $ seperated ", " emitExpr es
-emitExpr' (EIf _ e0 e1 e2) = do
-  parens $ do
-    emitExpr e0
-    emit " ? "
-    emitExpr e1
-    emit " : "
-    emitExpr e2
-emitExpr' (ELet t ls e) =
-  braceBlock $ do
-    mapM (\l ->
-            case l of
-              Local (MonoType t) n _ (Val e) -> do
-                indent
-                emitType t
-                emit " "
-                emitIdent n
-                emit " = "
-                emitExpr e
-                line ";"
-              Local _ _ _ (Fun f) -> emitFunction f)
-         ls
-    emitExpr e
+emitStmts :: [IRStmt] -> Emitter ()
+emitStmts [] = return ()
+emitStmts (s:ss) = indent >> (emitStmt s) >> (emit "\n") >> (emitStmts ss)
 
+emitStmt :: IRStmt -> Emitter ()
+emitStmt (IRDef t x mE) = do
+  emitType t
+  emit " "
+  emitIdent x
+  mapM_ (\e -> (emit " = ") >> emitExpr e) mE
+  emit ";"
+emitStmt (IRSet x e) = (emitIdent x) >> (emit " = ") >> (emitExpr e) >> (emit ";")
+emitStmt (IREval e) = (emitExpr e) >> (emit ";")
+emitStmt (IRReturn e) = (emit "return ") >> (emitExpr e) >> (emit ";")
+emitStmt (IRIf e0 sts1 sts2) = do
+  emit "if("
+  emitExpr e0
+  emit ") "
+  braceBlock $ emitStmts sts1
+  emit " else "
+  braceBlock $ emitStmts sts2
+
+emitExpr :: IRExpr -> Emitter ()
+emitExpr (IRVar x) = emitIdent x
+emitExpr (IRLit l) =
+  case l of
+    IRInt x -> emit $ T.pack $ show x
+    IRVoid -> emit "/*void*/"
+emitExpr (IROp o [x, y]) =
+    case o of
+        OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
+        OpEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
+emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
+emitExpr (IRCall x es) = do
+  emitIdent x
+  parens $ seperated ", " emitExpr es
 
 emitIdent :: Ident -> Emitter ()
 emitIdent (Ident n ns id) = do
@@ -825,7 +868,7 @@ emitIdent (Ident n ns id) = do
   emit n
   mapM_ (\id -> tell ["_", T.pack $ show id]) id
 
-emitType :: Type -> Emitter ()
+emitType :: IRType -> Emitter ()
 emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
 emitType (TCons (Ident "int" Nothing Nothing) []) = emit "int"
 emitType (TCons (Ident "bool" Nothing Nothing) []) = emit "bool"
@@ -847,11 +890,11 @@ compileAndRun f = do
             case infer fn of
                 Left err -> putStrLn $ show err
                 Right ast -> do
-                    putStrLn $ show $ runLowering $ lowerProgram ast
-                    let outF = f ++ ".c"
-                    let out = emitProgram ast
-                    TIO.writeFile outF out
-                    callProcess "tcc/tcc.exe" ["-I", "./tcc/include", "-run", outF]
+                  let ir = runLowering $ lowerProgram ast
+                  let outF = f ++ ".c"
+                  let out = emitProgram ir
+                  TIO.writeFile outF out
+                  callProcess "tcc/tcc.exe" ["-I", "./tcc/include", "-run", outF]
 
 main :: IO ()
 main = do

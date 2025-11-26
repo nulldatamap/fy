@@ -55,7 +55,14 @@ class FreeVars a where
 class Substitutable a where
   subst :: Subst -> a -> a
 
-data Program t = Program (Expr t)
+data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
+  deriving (Show)
+data TypeBody = TypeBody [TypeCons]
+  deriving (Show)
+data TypeDef = TypeDef { tdName :: Ident, tdBody :: TypeBody }
+  deriving (Show)
+
+data Program t = Program { pTypeDefs :: [TypeDef], pBody :: (Expr t) }
   deriving (Show)
 
 data Builtin = BAdd
@@ -142,13 +149,16 @@ data NameEntry = NameEntry { neName  :: Ident
   deriving Show
 
 type NameMap = M.HashMap Ident NameEntry
+type TypeDefMap = M.HashMap Ident (Maybe TypeBody)
 
 data NamingSt = NamingSt { nstNext   :: Int
                          , nstDepth  :: Int
                          , nstDeps   :: Set Ident
+                         , nstTypes  :: TypeDefMap
                          , nstScope  :: NameMap }
 
 data NamingError = UndefinedName Ident
+                 | UndefinedType Ident
                  | InvalidCapture Ident
   deriving Show
 
@@ -333,8 +343,38 @@ pExpr2 = do
 pExpr :: Parser UExpr
 pExpr = pExpr2
 
+pType' :: Parser Type
+pType' = pParenOrUnit
+      <|> (\x -> TCons x []) <$> pIdent
+  where
+    pParenOrUnit = do
+      t <- pParens (optional $ pType)
+      case t of
+        Nothing -> return tUnit
+        Just t -> return t
+
+pType :: Parser Type
+pType = do
+  args <- pTypeCons `sepBy1` (symbol ",")
+  ret <- optional $ (symbol "->") *> pTypeCons
+  case (args, ret) of
+    (args, Just ret) -> return $ TFun args ret
+    ([t], _) -> return t
+    (_, _)   -> error "Tuples are not supported yet"
+  where
+    pTypeCons = TCons <$> (pIdent) <*> (many pType')
+
+pTypeDef :: Parser TypeDef
+pTypeDef = do
+  symbol ":"
+  x <- pIdent
+  b <- optional $ do
+    symbol "="
+    many (TypeCons <$> (symbol "|" *> pIdent) <*> (many pType'))
+  return $ TypeDef x $ TypeBody $ fromMaybe [] b
+
 pProgram :: Parser UProgram
-pProgram = Program <$> (sc *> pExpr <* eof)
+pProgram = sc *> (Program <$> (many pTypeDef) <*> pExpr) <* eof
 
 -- ======== Naming
 
@@ -382,7 +422,8 @@ checkExpr e =
       ne <- lookup x
       curDepth <- nstDepth <$> get
       addDeps $ neName ne
-      if (neDepth ne) /= curDepth
+      let d = neDepth ne
+      if d /= curDepth && d > 0
       then throwError $ InvalidCapture (neName ne)
       else return $ EIdent () (neName ne)
     EApp () f xs -> (EApp ()) <$> (checkExpr f) <*> (mapM checkExpr xs)
@@ -420,6 +461,35 @@ checkFunction f xs e = do
 
 checkImplicitMain :: UExpr -> Naming UFunction
 checkImplicitMain e = checkFunction (mkId "__fy_main") [] e
+
+checkType :: Type -> Naming ()
+checkType (TVar _) = error "Parametric types are not supported yet"
+checkType (TCons x ts) = do
+  t <- ((M.lookup x) . nstTypes) <$> get
+  case t of
+    Nothing -> throwError $ UndefinedType x
+    Just _ -> mapM_ checkType ts
+checkType (TFun ts t) = (checkType t) >> (mapM_ checkType ts)
+
+checkTypeDef :: TypeDef -> Naming ()
+checkTypeDef (TypeDef x (TypeBody cs)) = do
+  mapM_ checkAndIntroCons cs
+  where
+    checkAndIntroCons (TypeCons c ts) = do
+      mapM_ checkType ts
+      modify (\s -> s { nstScope = M.insert c (NameEntry c 0) $ nstScope s })
+
+checkTypeDefs :: [TypeDef] -> Naming ()
+checkTypeDefs tds = do
+  modify (\s -> s { nstTypes = M.fromList $ builtins ++ (map (\td -> (tdName td, Just $ tdBody td)) tds) } )
+  mapM_ checkTypeDef tds
+  where
+    builtins = map (\x -> (mkId x, Nothing)) ["int", "()"]
+
+checkProgram :: UProgram -> Naming UFunction
+checkProgram (Program tds e) = do
+  checkTypeDefs tds
+  checkImplicitMain e
 
 -- ======== Typing
 
@@ -574,14 +644,23 @@ generalize t = do
 runTyping :: Typing a -> Either TypingError a
 runTyping t = runExcept $ evalStateT t defaultTypingSt
 
-infer :: UFunction -> Either TypingError TFunction
-infer f = runTyping $ do
+infer :: [TypeDef] -> UFunction -> Either TypingError TFunction
+infer tds f = runTyping $ do
+    mapM_ introTypeConses tds
     f' <- inferFunction f
     mainTy <- (TFun []) <$> fresh
     fty <- instanciate $ fType f'
     unify mainTy fty
     realize f'
   where
+    introTypeConses :: TypeDef -> Typing ()
+    introTypeConses (TypeDef t (TypeBody cs)) = mapM_ (introTypeCons (TCons t [])) cs
+    introTypeCons :: Type -> TypeCons -> Typing ()
+    introTypeCons t (TypeCons c ts) =
+      let ct = case ts of
+                 [] -> t
+                 ts -> TFun ts t
+      in modify (\s -> s { env = M.insert c (MonoType ct) $ env s })
     inferFunction f = do
       prmTys <- mapM (const fresh) $ fArgs f
       let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
@@ -832,11 +911,10 @@ emit x = tell [ x ]
 
 braceBlock :: Emitter a -> Emitter a
 braceBlock m = do
-  indent
   line "{"
   r <- indented m
   indent
-  line "}"
+  emit "}"
   return r
 
 emitProgram :: IRProgram -> Text
@@ -864,7 +942,7 @@ emitFunction f = do
     emit " "
     braceBlock $ do
       emitStmts $ irfBody f
-    emit "\n"
+    emit "\n\n"
 
 emitStmts :: [IRStmt] -> Emitter ()
 emitStmts [] = return ()
@@ -885,7 +963,7 @@ emitStmt (IRIf e0 sts1 sts2) = do
   emitExpr e0
   emit ") "
   braceBlock $ emitStmts sts1
-  emit " else "
+  indent >> emit " else "
   braceBlock $ emitStmts sts2
 
 emitExpr :: IRExpr -> Emitter ()
@@ -914,6 +992,7 @@ emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t
 emitType (TCons (Ident "int" Nothing Nothing) []) = emit "int"
 emitType (TCons (Ident "bool" Nothing Nothing) []) = emit "bool"
 emitType (TCons (Ident "()" Nothing Nothing) []) = emit "void"
+emitType (TCons x []) = emit "_" >> (emitIdent x)
 emitType t = error $ "Unsupported type: " ++ (show t)
 
 compileAndRun :: String -> IO ()
@@ -924,11 +1003,13 @@ compileAndRun f = do
       putStrLn $ errorBundlePretty err
       exitFailure
     Right ast' -> do
-      let Program e = ast'
-      case runNaming M.empty (checkImplicitMain e) of
+      let p = ast'
+      putStrLn $ show $ pTypeDefs p
+      case runNaming M.empty (checkProgram p) of
         Left err -> putStrLn $ show err
-        Right fn ->
-            case infer fn of
+        Right fn -> do
+            putStrLn $ show fn
+            case infer (pTypeDefs p) fn of
                 Left err -> putStrLn $ show err
                 Right ast -> do
                   let ir = runLowering $ lowerProgram ast

@@ -1,7 +1,9 @@
 -- Test program:
+: MyBool = | True | False
+
 if wow ($$eq 11 (k 3)) () (id qq)
-then id (double -3)
-else double 2
+then True
+else False
 . qq = ()
 . wow x y z = x
 . x = $$add ($$add 1 1) ($$add 2 3)

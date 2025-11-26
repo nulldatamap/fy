@@ -1,5 +1,8 @@
 -- Test program:
+: Pos = | Pos int int
 : MyBool = | True | False
+: OptInt = | Some int
+           | None
 
 if wow ($$eq 11 (k 3)) () (id qq)
 then True

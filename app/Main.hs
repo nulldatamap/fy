@@ -205,7 +205,7 @@ data IRFunc = IRFunc { irfName  :: Ident
                      , irfBody  :: [IRStmt] }
             deriving (Show)
 
-data IRProgram = IRProgram { irpFuncs :: [IRFunc] }
+data IRProgram = IRProgram { irpTypes :: [TypeDef], irpFuncs :: [IRFunc] }
             deriving (Show)
 
 data LoweringSt = LoweringSt { lstNext  :: Int
@@ -245,6 +245,10 @@ class (Hashable k, Monad m, MonadError e m) => Context m k v e
 
 mkId :: Text -> Ident
 mkId x = Ident x Nothing Nothing
+
+suffixId :: Ident -> Text -> Ident
+suffixId (Ident x ns i) s = Ident (T.append x s) ns i
+
 
 isFun :: ValOrFun t -> Bool
 isFun (Fun _) = True
@@ -864,11 +868,11 @@ lowerFunction f = do
   return f'
 
 
-lowerProgram :: TFunction -> Lowering IRProgram
-lowerProgram f = do
+lowerProgram :: [TypeDef] -> TFunction -> Lowering IRProgram
+lowerProgram types f = do
   lowerFunction f
   fs <- lstFuncs <$> get
-  return $ IRProgram { irpFuncs = reverse fs }
+  return $ IRProgram { irpTypes = types, irpFuncs = reverse fs }
 
 -- ======== Emitting
 
@@ -922,8 +926,8 @@ emitProgram p = runEmitter $ do
   lines [ "#include <stdio.h>"
         , "#include <stdbool.h>"
         , ""
-        , "int inc(int x) { return x + 1; }\n"
         ]
+  mapM_ emitTypeDef $ irpTypes p
   mapM_ emitFunction $ irpFuncs p
   lines [ "int main(int argc, const char** argv) {"
         , "  printf(\"Result: %d\\n\", __fy_main());"
@@ -992,8 +996,69 @@ emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t
 emitType (TCons (Ident "int" Nothing Nothing) []) = emit "int"
 emitType (TCons (Ident "bool" Nothing Nothing) []) = emit "bool"
 emitType (TCons (Ident "()" Nothing Nothing) []) = emit "void"
-emitType (TCons x []) = emit "_" >> (emitIdent x)
+emitType (TCons x []) = emitIdent x
 emitType t = error $ "Unsupported type: " ++ (show t)
+
+emitTypeDef :: TypeDef -> Emitter ()
+emitTypeDef (TypeDef t (TypeBody [])) = error $ "Zero types are not supported yet: " ++ (show t)
+emitTypeDef (TypeDef t (TypeBody cs)) =
+  case cs of
+    [TypeCons _ mts] -> do
+      emit "typedef "
+      emitStruct t mts
+      line ""
+    cs ->
+      if justTags
+      then emitEnum t variants
+      else do
+        let varTy = (t `suffixId` "__variant")
+        emitEnum varTy variants
+        indent
+        emit "typedef struct "
+        braceBlock $ do
+          indent
+          emitIdent varTy
+          line " __varaint;"
+          indent
+          emit "union "
+          braceBlock $
+            mapM_ (\(TypeCons c mts) -> emitStruct c mts) cs
+          line ";"
+        emit " "
+        emitIdent t
+        line ";\n"
+  where
+    (justTags, variants') =
+      foldl (\(j, vs) (TypeCons c mts) ->
+               (j && (null mts), c : vs))
+        (True, [])
+        cs
+    variants = reverse variants'
+    emitEnum t vs = do
+        indent
+        emit "typedef enum "
+        braceBlock $ do
+          mapM_ (\n -> indent >> (emitIdent n) >> line ",") vs
+        emit " "
+        emitIdent t
+        line ";\n"
+    emitStruct n ts = do
+      indent
+      emit "struct "
+      braceBlock $ do
+          mapM_ (\(i, mt) -> do
+                  indent
+                  emitType mt
+                  emit " "
+                  emit $ T.pack $ '_' : (show i)
+                  line ";")
+            (zip [0..] ts)
+      emit " "
+      emitIdent n
+      line ";"
+
+
+
 
 compileAndRun :: String -> IO ()
 compileAndRun f = do
@@ -1009,10 +1074,11 @@ compileAndRun f = do
         Left err -> putStrLn $ show err
         Right fn -> do
             putStrLn $ show fn
-            case infer (pTypeDefs p) fn of
+            let types = pTypeDefs p
+            case infer types fn of
                 Left err -> putStrLn $ show err
                 Right ast -> do
-                  let ir = runLowering $ lowerProgram ast
+                  let ir = runLowering $ lowerProgram types ast
                   let outF = f ++ ".c"
                   let out = emitProgram ir
                   TIO.writeFile outF out

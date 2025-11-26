@@ -9,5 +9,4 @@ else double 2
 . id x = x
 . double x = $$add x x
 
-
 -- Cool huh?

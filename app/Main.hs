@@ -104,6 +104,7 @@ type TyVar = Int
 
 data Type = TVar TyVar
           | TCons Ident [Type]
+          | TFun [Type] Type
           deriving (Eq, Generic)
 
 deriving instance Hashable Type
@@ -420,6 +421,7 @@ instance Typed Expr where
 instance FreeVars Type where
     freeVars (TVar x) = S.singleton x
     freeVars (TCons _ ts) = foldMap freeVars ts
+    freeVars (TFun ts t) = (foldMap freeVars ts) `S.union` (freeVars t)
 
 instance FreeVars TypeScheme where
   freeVars (MonoType t) = freeVars t
@@ -431,6 +433,7 @@ instance FreeVars Env where
 instance Substitutable Type where
     subst (Subst m) (TVar x) = fromMaybe (TVar x) $ M.lookup x m
     subst s (TCons k ts) = TCons k $ map (subst s) ts
+    subst s (TFun ts t)  = TFun (map (subst s) ts) (subst s t)
 
 instance Substitutable (Expr Type) where
   subst s x = fmap (subst s) x
@@ -484,21 +487,15 @@ tBool = TCons (mkId "bool") []
 tUnit :: Type
 tUnit = TCons (mkId "()") []
 
-tFn :: [Type] -> Type -> Type
-tFn [] y = TCons (mkId "->") [tUnit, y]
-tFn ts y = foldr (\t r -> TCons (mkId "->") [t, r]) y ts
-
 unFn :: Type -> Maybe ([Type], Type)
-unFn (TCons (Ident "->" Nothing Nothing) [x, y]) = Just $ helper [x] y
-  where
-    helper args (TCons (Ident "->" Nothing Nothing) [arg, tail]) = helper (arg:args) tail
-    helper args ret = (reverse args, ret)
+unFn (TFun ts t) = Just (ts, t)
 unFn _ = Nothing
 
 instance Show Type where
   show (TVar x) = "'t" ++ show x
-  show (TCons (Ident "->" Nothing Nothing) [x, y]) =  "(" ++ (show x) ++ " -> " ++ (show y) ++ ")"
+  show (TCons x []) = show x
   show (TCons x ts) = "(" ++ (show x) ++ (intercalate " " $ map show ts) ++  ")"
+  show (TFun ts t) = "(" ++ (intercalate ", " $ map show ts) ++ " -> " ++ (show t) ++ ")"
 
 instance Show a => Show (TypeSchemeT a)  where
   show (MonoType t) = show t
@@ -529,6 +526,13 @@ unify ty@(TCons x xs) tx@(TCons y ys) =
   if x == y && length xs == length ys
   then mapM_ (uncurry unify) $ zip xs ys
   else throwError $ UnificationError tx ty
+unify fy@(TFun xs x) fx@(TFun ys y) =
+  if length xs == length ys
+  then do
+    mapM_ (uncurry unify) $ zip xs ys
+    unify x y
+  else throwError $ UnificationError fx fy
+unify x y = throwError $ UnificationError x y
 
 realize :: Substitutable a => a -> Typing a
 realize x = do
@@ -556,7 +560,7 @@ runTyping t = runExcept $ evalStateT t defaultTypingSt
 infer :: UFunction -> Either TypingError TFunction
 infer f = runTyping $ do
     f' <- inferFunction f
-    mainTy <- (tFn []) <$> fresh
+    mainTy <- (TFun []) <$> fresh
     fty <- instanciate $ fType f'
     unify mainTy fty
     realize f'
@@ -567,7 +571,7 @@ infer f = runTyping $ do
       e' <- scoped prms $ inferExpr $ fBody f
       retTy <- fresh
       unify (typeOf e') retTy
-      fty <- realize $ tFn prmTys retTy
+      fty <- realize $ TFun prmTys retTy
       fty' <- generalize fty
       realize $ Function { fName = fName f
                         , fType = fty'
@@ -595,14 +599,14 @@ infer f = runTyping $ do
       return $ EIdent t x
     inferExpr (EBuiltin _ b) = do
       t <- case b of
-             BAdd -> return $ tFn [tInt, tInt] tInt
-             BEq  -> (\a -> tFn [a, a] tBool) <$> fresh
+             BAdd -> return $ TFun [tInt, tInt] tInt
+             BEq  -> (\a -> TFun [a, a] tBool) <$> fresh
       return $ EBuiltin t b
     inferExpr (EApp _ f xs) = do
       f' <- inferExpr f
       xs' <- mapM inferExpr xs
       rt <- fresh
-      unify (typeOf f') (tFn (map typeOf xs') rt)
+      unify (typeOf f') (TFun (map typeOf xs') rt)
       return $ EApp rt f' xs'
     inferExpr (EIf _ e0 e1 e2) = do
       e0' <- inferExpr e0

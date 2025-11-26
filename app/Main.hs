@@ -1,6 +1,21 @@
 {-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Main (main) where
 
+-- NEXT:
+-- - Simple destructuring
+-- TODO:
+-- - Nested destructuring
+-- - - Guards?
+-- - Zero types
+-- - Tuples
+-- - Function pointer types
+-- - Parametric types
+-- - Boxed types
+-- - Toplevel functions?
+-- - Lambdas
+-- - Closures
+-- - Pipe operators
+
 import Debug.Trace (trace, traceStack)
 import GHC.Stack (HasCallStack, prettyCallStack, callStack)
 

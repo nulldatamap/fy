@@ -20,7 +20,7 @@ import qualified Data.List.NonEmpty as NE
 import Data.List (intersperse, intercalate, partition)
 import Data.Maybe (fromMaybe, maybeToList)
 import Data.Char
-import Control.Monad (when, foldM)
+import Control.Monad (when, foldM, unless)
 import Control.Monad.State
 import Control.Monad.Except
 import Control.Monad.RWS
@@ -194,6 +194,7 @@ data IRLit = IRInt Integer
 data IRExpr = IRVar Ident
             | IROp Operator [IRExpr]
             | IRCall Ident [IRExpr]
+            | IRCons Ident [IRExpr]
             | IRLit IRLit
             deriving (Show)
 
@@ -215,8 +216,11 @@ data IRProgram = IRProgram { irpTypes :: [IRTypeDef], irpFuncs :: [IRFunc] }
 
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
+                             , lstConses :: Set Ident
+                             , lstKnownTypes :: M.HashMap Ident TypeDef
+                             , lstTypeInsts  :: M.HashMap (Ident, Type) IRTypeDef
                              , lstKnownFuncs :: M.HashMap Ident TFunction
-                             , lstFuncInsts :: M.HashMap (Ident, Type) IRFunc }
+                             , lstFuncInsts  :: M.HashMap (Ident, Type) IRFunc }
 
 type Lowering = RWS () [IRStmt] LoweringSt
 
@@ -735,6 +739,9 @@ runLowering :: Lowering a -> a
 runLowering m = fst $ evalRWS m () $
   LoweringSt { lstNext  = 0
              , lstFuncs = []
+             , lstConses = S.empty
+             , lstTypeInsts = M.empty
+             , lstKnownTypes = M.empty
              , lstFuncInsts = M.empty
              , lstKnownFuncs = M.empty
              }
@@ -777,11 +784,16 @@ lowerExpr :: TExpr -> Lowering IRExpr
 lowerExpr e =
   if (typeOf e) == tUnit
   then return $ IRLit IRVoid
-  else
+  else do
+    conses <- lstConses <$> get
     case e of
       ELit _ (LInt i) -> return $ IRLit $ IRInt i
       EBuiltin t b -> error $ "Bare operatior: " ++ (show e)
+      EIdent t x | x `S.member` conses -> return $ IRCons x []
       EIdent t x -> return $ IRVar x
+      EApp _ (EIdent _ x) xs | x `S.member` conses -> do
+        xs' <- mapM lowerExpr xs
+        return $ IRCons x xs'
       EApp t (EBuiltin bt b) xs -> do
         xs' <- filterVoids <$> mapM lowerExpr xs
         let o = case b of
@@ -827,28 +839,28 @@ instanciateFunc fx ft = do
   case M.lookup (fx, ft) (lstFuncInsts st) of
     Just f -> return $ irfName f
     Nothing -> do
-        let f = case M.lookup fx (lstKnownFuncs st) of
-                    Nothing -> error $ "Tried to instanciate unknown function: " ++ (show fx)
-                    Just f -> f
-        case fType f of
-          MonoType _ -> do
-            f' <- lowerFunction f
-            let fx' = irfName f'
-            modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
-            return fx'
-          PolyType txs rft -> do
-            let mF' = runTyping $ do
-                        unify rft ft
-                        realize $ f { fType = MonoType ft }
-            case mF' of
-              Left err -> error $ "Failed to instanciate "
-                ++ (show fx) ++ " as " ++ (show ft)
-                ++ ": " ++ (show err)
-              Right f' -> do
-                fx' <- refreshName $ fName f'
-                f' <- lowerFunction $ f' { fName = fx' }
+        case M.lookup fx (lstKnownFuncs st) of
+          Nothing -> error $ "Tried to instanciate unknown function: " ++ (show fx)
+          Just f ->
+            case fType f of
+              MonoType _ -> do
+                f' <- lowerFunction f
+                let fx' = irfName f'
                 modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
                 return fx'
+              PolyType txs rft -> do
+                let mF' = runTyping $ do
+                            unify rft ft
+                            realize $ f { fType = MonoType ft }
+                case mF' of
+                  Left err -> error $ "Failed to instanciate "
+                    ++ (show fx) ++ " as " ++ (show ft)
+                    ++ ": " ++ (show err)
+                  Right f' -> do
+                    fx' <- refreshName $ fName f'
+                    f' <- lowerFunction $ f' { fName = fx' }
+                    modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
+                    return fx'
   where
     refreshName (Ident x ns i) = do
       let x' = case i of
@@ -872,20 +884,27 @@ lowerFunction f = do
   modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
   return f'
 
-lowerType :: TypeDef -> IRTypeDef
+registerConses :: [Ident] -> Lowering ()
+registerConses cs =
+  modify (\s -> s { lstConses = (lstConses s) `S.union` (S.fromList cs) })
+
+lowerType :: TypeDef -> Lowering IRTypeDef
 lowerType (TypeDef _ (TypeBody [])) = error $ "Zero types are not supported yet"
-lowerType (TypeDef n (TypeBody [(TypeCons c ts)])) = IRStructType n c ts
-lowerType (TypeDef n (TypeBody cs)) =
+lowerType (TypeDef n (TypeBody [(TypeCons c ts)])) = do
+  registerConses [c]
+  return $ IRStructType n c ts
+lowerType (TypeDef n (TypeBody cs)) = do
+  registerConses $ map (\(TypeCons c _) -> c) cs
   if allTags
-  then IREnumType n $ reverse variants
-  else IRTaggedType n cs
+  then return $ IREnumType n $ reverse variants
+  else return $ IRTaggedType n cs
   where
     (allTags, variants) =
       foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), v : vs)) (True, []) cs
 
 lowerProgram :: [TypeDef] -> TFunction -> Lowering IRProgram
 lowerProgram types f = do
-  let types' = map lowerType types
+  types' <- mapM lowerType types
   lowerFunction f
   fs <- lstFuncs <$> get
   return $ IRProgram { irpTypes = types', irpFuncs = reverse fs }
@@ -997,6 +1016,10 @@ emitExpr (IROp o [x, y]) =
         OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
         OpEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
+emitExpr (IRCons x es) = do
+  emit "MK_"
+  emitIdent x
+  parens $ seperated ", " emitExpr es
 emitExpr (IRCall x es) = do
   emitIdent x
   parens $ seperated ", " emitExpr es

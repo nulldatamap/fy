@@ -182,6 +182,11 @@ data Operator = OpAdd
 
 type IRType = Type
 
+data IRTypeDef = IREnumType Ident [Ident]
+               | IRStructType Ident Ident [Type]
+               | IRTaggedType Ident [TypeCons]
+               deriving Show
+
 data IRLit = IRInt Integer
            | IRVoid
            deriving (Show)
@@ -205,7 +210,7 @@ data IRFunc = IRFunc { irfName  :: Ident
                      , irfBody  :: [IRStmt] }
             deriving (Show)
 
-data IRProgram = IRProgram { irpTypes :: [TypeDef], irpFuncs :: [IRFunc] }
+data IRProgram = IRProgram { irpTypes :: [IRTypeDef], irpFuncs :: [IRFunc] }
             deriving (Show)
 
 data LoweringSt = LoweringSt { lstNext  :: Int
@@ -867,12 +872,23 @@ lowerFunction f = do
   modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
   return f'
 
+lowerType :: TypeDef -> IRTypeDef
+lowerType (TypeDef _ (TypeBody [])) = error $ "Zero types are not supported yet"
+lowerType (TypeDef n (TypeBody [(TypeCons c ts)])) = IRStructType n c ts
+lowerType (TypeDef n (TypeBody cs)) =
+  if allTags
+  then IREnumType n $ reverse variants
+  else IRTaggedType n cs
+  where
+    (allTags, variants) =
+      foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), v : vs)) (True, []) cs
 
 lowerProgram :: [TypeDef] -> TFunction -> Lowering IRProgram
 lowerProgram types f = do
+  let types' = map lowerType types
   lowerFunction f
   fs <- lstFuncs <$> get
-  return $ IRProgram { irpTypes = types, irpFuncs = reverse fs }
+  return $ IRProgram { irpTypes = types', irpFuncs = reverse fs }
 
 -- ======== Emitting
 
@@ -927,7 +943,7 @@ emitProgram p = runEmitter $ do
         , "#include <stdbool.h>"
         , ""
         ]
-  mapM_ emitTypeDef $ irpTypes p
+  mapM_ (\td -> (emitTypeDef td) >> (emitConses td)) $ irpTypes p
   mapM_ emitFunction $ irpFuncs p
   lines [ "int main(int argc, const char** argv) {"
         , "  printf(\"Result: %d\\n\", __fy_main());"
@@ -999,66 +1015,92 @@ emitType (TCons (Ident "()" Nothing Nothing) []) = emit "void"
 emitType (TCons x []) = emitIdent x
 emitType t = error $ "Unsupported type: " ++ (show t)
 
-emitTypeDef :: TypeDef -> Emitter ()
-emitTypeDef (TypeDef t (TypeBody [])) = error $ "Zero types are not supported yet: " ++ (show t)
-emitTypeDef (TypeDef t (TypeBody cs)) =
-  case cs of
-    [TypeCons _ mts] -> do
-      emit "typedef "
-      emitStruct t mts
-      line ""
-    cs ->
-      if justTags
-      then emitEnum t variants
-      else do
-        let varTy = (t `suffixId` "__variant")
-        emitEnum varTy variants
-        indent
-        emit "typedef struct "
-        braceBlock $ do
-          indent
-          emitIdent varTy
-          line " __varaint;"
-          indent
-          emit "union "
-          braceBlock $
-            mapM_ (\(TypeCons c mts) -> emitStruct c mts) cs
-          line ";"
-        emit " "
-        emitIdent t
-        line ";\n"
+emitEnum :: Ident -> [Ident] -> Emitter ()
+emitEnum t vs = do
+    indent
+    emit "typedef enum "
+    braceBlock $ do
+      mapM_ (\n -> indent >> (emitIdent n) >> line ",") vs
+    emit " "
+    emitIdent t
+    line ";\n"
+emitStruct :: Ident -> [Type] -> Emitter ()
+emitStruct n ts = do
+  indent
+  emit "struct "
+  braceBlock $ do
+      mapM_ (\(i, mt) -> do
+              indent
+              emitType mt
+              emit " "
+              emit $ T.pack $ '_' : (show i)
+              line ";")
+        (zip [0 :: Int ..] ts)
+  emit " "
+  emitIdent n
+  line ";"
+
+emitTypeDef :: IRTypeDef -> Emitter ()
+emitTypeDef (IRStructType t c mts) = do
+  emit "typedef "
+  emitStruct t mts
+  line ""
+emitTypeDef (IREnumType t variants) = emitEnum t variants
+emitTypeDef (IRTaggedType t cs) = do
+  let varTy = (t `suffixId` "__variant")
+  emitEnum varTy $ map (\(TypeCons v _) -> v) cs
+  indent
+  emit "typedef struct "
+  braceBlock $ do
+    indent
+    emitIdent varTy
+    line " __variant;"
+    indent
+    emit "union "
+    braceBlock $
+      mapM_ (\(TypeCons c mts) -> emitStruct c mts) cs
+    line ";"
+  emit " "
+  emitIdent t
+  line ";\n"
   where
-    (justTags, variants') =
-      foldl (\(j, vs) (TypeCons c mts) ->
-               (j && (null mts), c : vs))
-        (True, [])
-        cs
-    variants = reverse variants'
-    emitEnum t vs = do
-        indent
-        emit "typedef enum "
-        braceBlock $ do
-          mapM_ (\n -> indent >> (emitIdent n) >> line ",") vs
-        emit " "
-        emitIdent t
-        line ";\n"
-    emitStruct n ts = do
-      indent
-      emit "struct "
-      braceBlock $ do
-          mapM_ (\(i, mt) -> do
-                  indent
-                  emitType mt
-                  emit " "
-                  emit $ T.pack $ '_' : (show i)
-                  line ";")
-            (zip [0..] ts)
+
+emitConses :: IRTypeDef -> Emitter ()
+emitConses (IREnumType t variants) = do
+  mapM_ (\v -> do
+            emit "#define MK_"
+            emitIdent v
+            emit "() "
+            emitIdent v
+            line "") variants
+  line ""
+emitConses (IRStructType t c ts) = do
+  emit "#define MK_"
+  emitIdent c
+  let args = map (\(i, _) -> Ident "__arg" Nothing (Just i)) $ zip [0 :: Int ..] ts
+  parens $ seperated ", " emitIdent args
+  emit " "
+  parens $ emitIdent t
+  emit " {"
+  seperated ", " emitIdent args
+  line " }\n"
+emitConses (IRTaggedType t cs) = mapM_ emitCons cs >> line ""
+  where
+    emitCons (TypeCons c ts) = do
+      emit "#define MK_"
+      emitIdent c
+      let args = map (\(i, _) -> Ident "__arg" Nothing (Just i)) $ zip [0 :: Int ..] ts
+      parens $ seperated ", " emitIdent args
       emit " "
-      emitIdent n
-      line ";"
-
-
-
+      parens $ emitIdent t
+      emit " {.__variant = "
+      emitIdent c
+      emit ", ."
+      emitIdent c
+      emit " = {"
+      seperated ", " emitIdent args
+      emit "}"
+      line "}"
 
 compileAndRun :: String -> IO ()
 compileAndRun f = do
@@ -1069,11 +1111,9 @@ compileAndRun f = do
       exitFailure
     Right ast' -> do
       let p = ast'
-      putStrLn $ show $ pTypeDefs p
       case runNaming M.empty (checkProgram p) of
         Left err -> putStrLn $ show err
         Right fn -> do
-            putStrLn $ show fn
             let types = pTypeDefs p
             case infer types fn of
                 Left err -> putStrLn $ show err

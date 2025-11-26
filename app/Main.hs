@@ -18,7 +18,7 @@ import Data.Set (Set)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Char
 import Control.Monad (when, foldM)
 import Control.Monad.State
@@ -92,7 +92,12 @@ data Function t = Function { fName   :: Ident
   deriving (Show, Foldable, Functor)
 
 
-data Expr t = EInt t Integer
+data Lit = LInt Integer
+         | LUnit
+         deriving Show
+
+data Expr t = ELit t Lit
+            | ETup t [Expr t]
             | EBuiltin t Builtin
             | EIdent t Ident
             | EApp t (Expr t) [Expr t]
@@ -281,13 +286,21 @@ pBuiltin = try $ do
       customFailure $ InvalidBuiltin x
 
 pExpr0 :: Parser UExpr
-pExpr0 =  (pParens pExpr)
-      <|> ((EInt ())     <$> pInteger)
-      <|> ((EIdent ())   <$> pIdent)
-      <|> ((EBuiltin ()) <$> pBuiltin)
+pExpr0 =  pParenTupleOrUnit
+      <|> (((ELit ()) . LInt) <$> pInteger)
+      <|> ((EIdent ())        <$> pIdent)
+      <|> ((EBuiltin ())      <$> pBuiltin)
       <|> ((EIf ()) <$> ((symbol "if")   *> pExpr1)
                     <*> ((symbol "then") *> pExpr1)
                     <*> ((symbol "else"  *> pExpr1)))
+  where
+    pParenTupleOrUnit = do
+      es <- pParens $ pExpr `sepBy` (symbol ",")
+      return $
+        case es of
+            []  -> ELit () LUnit
+            [e] -> e
+            es  -> error "Tuples are not supported yet"
 
 pExpr1 :: Parser UExpr
 pExpr1 = do
@@ -411,7 +424,7 @@ checkImplicitMain e = checkFunction (mkId "__fy_main") [] e
 -- ======== Typing
 
 instance Typed Expr where
-  withType f x@(EInt t _) = f t x
+  withType f x@(ELit t _) = f t x
   withType f x@(EIdent t _) = f t x
   withType f x@(EBuiltin t _) = f t x
   withType f x@(EApp t _ _) = f t x
@@ -490,6 +503,10 @@ tUnit = TCons (mkId "()") []
 unFn :: Type -> Maybe ([Type], Type)
 unFn (TFun ts t) = Just (ts, t)
 unFn _ = Nothing
+
+isFnTy :: Type -> Bool
+isFnTy (TFun _ _) = True
+isFnTy _          = False
 
 instance Show Type where
   show (TVar x) = "'t" ++ show x
@@ -593,7 +610,11 @@ infer f = runTyping $ do
             f' <- inferFunction f
             return (Fun f', fType f')
       scoped [(lName l, t')] $ inferWithSccLocals ls e ((Local t' (lName l) (lDeps l) vof):ls')
-    inferExpr (EInt _ x) = return $ EInt tInt x
+    inferExpr (ELit _ l) = do
+      let t = case l of
+                LInt _ -> tInt
+                LUnit  -> tUnit
+      return $ ELit t l
     inferExpr (EIdent _ x) = do
       t <- lookup x >>= instanciate
       return $ EIdent t x
@@ -640,11 +661,17 @@ newVar' t = do
 newVar :: Lowering Ident
 newVar = newVar' Nothing
 
+irDef :: Type -> Ident -> (Maybe IRExpr) -> Lowering ()
+irDef t x v =
+  if t == tUnit
+  then return ()
+  else tell [ IRDef t x v ]
+
 lowerLocal :: Local Type -> Lowering ()
 lowerLocal l@(Local t x _ (Val e)) = do
   e' <- lowerExpr e
   case t of
-    MonoType t -> tell $ [ IRDef t x (Just e') ]
+    MonoType t -> irDef t x (Just e')
     _ -> error $ "Can't lower a polytype local: " ++ (show l)
 lowerLocal (Local _ x _ (Fun f)) =
   modify (\s -> s { lstKnownFuncs = M.insert x f (lstKnownFuncs s) } )
@@ -652,41 +679,50 @@ lowerLocal (Local _ x _ (Fun f)) =
 stmts :: Lowering a -> Lowering (a, [IRStmt])
 stmts m = censor (const []) $ listen m
 
+filterVoids :: [IRExpr] -> [IRExpr]
+filterVoids = filter (\x -> case x of
+                              IRLit IRVoid -> False
+                              _            -> True)
+
+
 lowerExpr :: TExpr -> Lowering IRExpr
 lowerExpr e =
-  case e of
-    EInt _ i -> return $ IRLit $ IRInt i
-    EBuiltin t b -> error $ "Bare operatior: " ++ (show e)
-    EIdent _ x -> return $ IRVar x
-    EApp t (EBuiltin bt b) xs -> do
-      xs' <- mapM lowerExpr xs
-      let o = case b of
-                BAdd -> OpAdd
-                BEq  -> OpEq
-      return $ IROp o xs'
-    EApp t f xs -> do
-      f' <- lowerExpr f
-      xs' <- mapM lowerExpr xs
-      case f' of
-        IRVar fx -> do
-          fx' <- instanciateFunc fx (typeOf f)
-          return $ IRCall fx' xs'
-        _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show $ EApp t f xs)
-    ELet t ls e -> do
-      mapM_ lowerLocal ls
-      lowerExpr e
-    EIf t e0 e1 e2 -> do
-      r <- newVar' (Just "_phi")
-      tell [ IRDef t r Nothing ]
-      e0' <- lowerExpr e0
-      (_, sts1) <- stmts $ do
-        e1' <- lowerExpr e1
-        tell [ IRSet r e1' ]
-      (_, sts2) <- stmts $ do
-        e2' <- lowerExpr e2
-        tell [ IRSet r e2' ]
-      tell [ IRIf e0' sts1 sts2 ]
-      return $ IRVar r
+  if (typeOf e) == tUnit
+  then return $ IRLit IRVoid
+  else
+    case e of
+      ELit _ (LInt i) -> return $ IRLit $ IRInt i
+      EBuiltin t b -> error $ "Bare operatior: " ++ (show e)
+      EIdent t x -> return $ IRVar x
+      EApp t (EBuiltin bt b) xs -> do
+        xs' <- filterVoids <$> mapM lowerExpr xs
+        let o = case b of
+                  BAdd -> OpAdd
+                  BEq  -> OpEq
+        return $ IROp o xs'
+      EApp t f xs -> do
+        f' <- lowerExpr f
+        xs' <- filterVoids <$> mapM lowerExpr xs
+        case f' of
+          IRVar fx -> do
+            fx' <- instanciateFunc fx (typeOf f)
+            return $ IRCall fx' xs'
+          _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show $ EApp t f xs)
+      ELet t ls e -> do
+        mapM_ lowerLocal ls
+        lowerExpr e
+      EIf t e0 e1 e2 -> do
+        r <- newVar' (Just "_phi")
+        irDef t r Nothing
+        e0' <- lowerExpr e0
+        (_, sts1) <- stmts $ do
+          e1' <- lowerExpr e1
+          tell [ IRSet r e1' ]
+        (_, sts2) <- stmts $ do
+          e2' <- lowerExpr e2
+          tell [ IRSet r e2' ]
+        tell [ IRIf e0' sts1 sts2 ]
+        return $ IRVar r
 
 lowerBody :: TExpr -> Lowering ()
 lowerBody b = do
@@ -825,6 +861,7 @@ emitFunction f = do
     parens $ do
       let prms = filter ((/= tUnit) . snd) $ irfArgs f
       seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) prms
+    emit " "
     braceBlock $ do
       emitStmts $ irfBody f
     emit "\n"

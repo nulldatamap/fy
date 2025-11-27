@@ -129,6 +129,11 @@ data Pat t = PHole t
            | PCons t Ident [Pat t]
   deriving (Show, Functor, Foldable)
 
+data Case t = Case { cPat :: Pat t
+                   , cBindings :: [(Ident, t)]
+                   , cArm :: Expr t }
+  deriving (Show, Functor, Foldable)
+
 data Expr t = ELit t Lit
             | ETup t [Expr t]
             | EBuiltin t Builtin
@@ -136,7 +141,7 @@ data Expr t = ELit t Lit
             | EApp t (Expr t) [Expr t]
             | ELet t [Local t] (Expr t)
             | EIf t (Expr t) (Expr t) (Expr t)
-            | ECase t (Expr t) [(Pat t, Expr t)]
+            | ECase t (Expr t) [Case t]
             -- Never parsed:
             | ELocal t Ident
             -- | ECapture t Ident
@@ -205,11 +210,13 @@ type Naming = StateT NamingSt (Except NamingError)
 
 type UProgram  = Program ()
 type UPat      = Pat ()
+type UCase     = Case ()
 type UExpr     = Expr ()
 type UFunction = Function ()
 
 type TProgram  = Program Type
-type Tpat      = Pat Type
+type TPat      = Pat Type
+type TCase     = Case Type
 type TExpr     = Expr Type
 type TFunction = Function Type
 
@@ -258,7 +265,6 @@ data IRProgram = IRProgram { irpTypes :: [IRTypeDef], irpFuncs :: [IRFunc] }
 
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
-                             , lstConses :: Set Ident
                              , lstKnownTypes :: M.HashMap Ident TypeDef
                              , lstTypeInsts  :: M.HashMap (Ident, Type) IRTypeDef
                              , lstKnownFuncs :: M.HashMap Ident TFunction
@@ -320,7 +326,7 @@ pParens :: Parser a -> Parser a
 pParens = between (symbol "(") (symbol ")")
 
 keywords :: [Text]
-keywords = ["if", "then", "else"]
+keywords = ["_", "if", "then", "else"]
 
 pIdent' :: Parser Text
 pIdent' = try $ do
@@ -365,9 +371,9 @@ pExpr0 =  ((ELit ()) <$> pLit)
       <|> pParenTupleOrUnit
       <|> ((EIdent ()) <$> pIdent)
       <|> ((EBuiltin ()) <$> pBuiltin)
-      <|> ((EIf ()) <$> ((symbol "if")   *> pExpr1)
-                    <*> ((symbol "then") *> pExpr1)
-                    <*> ((symbol "else"  *> pExpr1)))
+      <|> ((EIf ()) <$> ((symbol "if")   *> pExpr2)
+                    <*> ((symbol "then") *> pExpr2)
+                    <*> ((symbol "else"  *> pExpr2)))
   where
     pParenTupleOrUnit = do
       es <- pParens $ pExpr `sepBy1` (symbol ",")
@@ -394,8 +400,7 @@ pExpr2 = do
     [] -> return e
     _ -> return $ ECase () e cases
   where
-    pCase = (,) <$> (symbol "|" *> pPat) <*> (symbol "->" *> pExpr1)
-
+    pCase = (\p e -> Case p [] e) <$> (symbol "|" *> pPat) <*> (symbol "->" *> pExpr1)
 
 pExpr3 :: Parser UExpr
 pExpr3 = do
@@ -495,10 +500,15 @@ runNaming gs n = runExcept (evalStateT n st)
   where
     st = NamingSt { nstNext = 0, nstScope = gs, nstDepth = 0 }
 
+withVars :: [(Ident, Ident)] -> Naming a -> Naming a
+withVars xs m = do
+    d <- nstDepth <$> get
+    scoped (map (\(x, x') -> (x, NameEntry x' (NKLocal d))) xs) m
+
 scopedVars' :: [Ident] -> Naming a -> Naming ([Ident], a)
 scopedVars' xs m = do
-    d <- nstDepth <$> get
     xs' <- mapM uniqId xs
+    d <- nstDepth <$> get
     scoped (map (\(x, x') -> (x, NameEntry x' (NKLocal d))) $ zip xs xs') $ ((,) xs') <$> m
 
 scopedVars :: [Ident] -> Naming a -> Naming a
@@ -520,34 +530,45 @@ checkLocal (Local t x _ (Fun f)) = do
    f <- checkFunction x' (map fst $ fArgs f) (fBody f)
    return $ Local t x' (S.empty) (Fun f)
 
-checkPat :: UPat -> Naming (UPat, (Set Ident))
-checkPat (PBinding () x) = do
+checkPat :: UPat -> Naming (UPat, [(Ident, Ident)])
+checkPat p = do
+  (p', _, vs) <- checkPat' p S.empty
+  return (p', vs)
+checkPat' :: UPat -> Set Ident -> Naming (UPat, Set Ident, [(Ident, Ident)])
+checkPat' (PBinding () x) seen = do
   mX' <- tryLookup x
   case mX' of
-    Just (NameEntry _ NKCons) -> return $ (PCons () x [], S.empty)
-    _ -> return $ (PBinding () x, S.singleton x)
-checkPat p@(PCons () x ps) = do
+    Just (NameEntry _ NKCons) -> return $ (PCons () x [], seen, [])
+    _ -> do
+      when (x `S.member` seen) $ throwError $ DuplicateNames [x]
+      x' <- uniqId x
+      return $ (PBinding () x', S.insert x seen, [(x, x')])
+checkPat' p@(PCons () x ps) seen = do
    mK <- tryLookup x
    case mK of
      Just (NameEntry _ NKCons) -> do
-       (ps', vss) <- unzip <$> mapM checkPat ps
-       let vs = S.unions vss
-       -- TODO: Actual find which names are duplicated
-       when (S.size vs /= sum (map S.size vss)) $
-         throwError $ DuplicateNames $ S.toList vs
-       return $ (PCons () x ps', vs)
+       (ps', seen', vs) <-
+         foldM (\(ps0, seen0, vs0) p -> do
+                   (p', seen', vs') <- checkPat' p seen0
+                   return (p':ps0, seen', vs0 ++ vs'))
+            ([], seen, [])
+            (reverse ps)
+       return $ (PCons () x ps', seen', vs)
      _ ->
        -- A undefined nilary constructor? It's actually a binding!
        if null ps
-       then return $ (PBinding () x, S.singleton x)
+       then do
+         when (x `S.member` seen) $ throwError $ DuplicateNames [x]
+         x' <- uniqId x
+         return $ (PBinding () x', S.insert x seen, [(x, x')])
        else throwError $ InvalidPattern p
-checkPat p = return (p, S.empty)
+checkPat' p seen = return (p, seen, [])
 
-checkCase :: (UPat, UExpr) -> Naming (UPat, UExpr)
-checkCase (p, e) = do
+checkCase :: UCase -> Naming UCase
+checkCase (Case p _ e) = do
   (p', vs) <- checkPat p
-  e' <- scopedVars (S.toList vs) $ checkExpr e
-  return (p', e')
+  e' <- withVars vs $ checkExpr e
+  return (Case p' (map (\(_, v) -> (v, ())) vs) e')
 
 checkExpr :: UExpr -> Naming UExpr
 checkExpr e =
@@ -620,10 +641,20 @@ checkProgram (Program tds e) = do
 instance Typed Expr where
   withType f x@(ELit t _) = f t x
   withType f x@(EIdent t _) = f t x
+  withType f x@(ELocal t _) = f t x
+  withType f x@(EGlobal t _) = f t x
+  withType f x@(ECons t _) = f t x
   withType f x@(EBuiltin t _) = f t x
   withType f x@(EApp t _ _) = f t x
   withType f x@(ELet t _ _) = f t x
   withType f x@(EIf t _ _ _) = f t x
+  withType f x@(ECase t _ _) = f t x
+
+instance Typed Pat where
+  withType f x@(PHole t) = f t x
+  withType f x@(PLit t _) = f t x
+  withType f x@(PBinding t _) = f t x
+  withType f x@(PCons t _ _) = f t x
 
 instance FreeVars Type where
     freeVars (TVar x) = S.singleton x
@@ -768,6 +799,117 @@ generalize t = do
 runTyping :: Typing a -> Either TypingError a
 runTyping t = runExcept $ evalStateT t defaultTypingSt
 
+introTypeConses :: TypeDef -> Typing ()
+introTypeConses (TypeDef _ (TBCType _)) = return ()
+introTypeConses (TypeDef t (TBConses cs)) = mapM_ (introTypeCons (TCons t [])) cs
+
+introTypeCons :: Type -> TypeCons -> Typing ()
+introTypeCons t (TypeCons c ts) =
+  let ct = case ts of
+             [] -> t
+             ts -> TFun ts t
+  in modify (\s -> s { env = M.insert c (MonoType ct) $ env s })
+
+inferFunction f = do
+  prmTys <- mapM (const fresh) $ fArgs f
+  let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
+  e' <- scoped prms $ inferExpr $ fBody f
+  retTy <- fresh
+  unify (typeOf e') retTy
+  fty <- realize $ TFun prmTys retTy
+  fty' <- generalize fty
+  realize $ Function { fName = fName f
+                    , fType = fty'
+                    , fArgs = zip (map fst $ fArgs f) prmTys
+                    , fDeps   = fDeps f
+                    , fBody   = e' }
+
+inferWithSccLocals [] e ls' = do
+  e' <- inferExpr e
+  return (reverse ls', e')
+inferWithSccLocals ((NECyclicSCC xs):ls) e ls' = throwError $ InvalidRecursion $ NE.map lName xs
+inferWithSccLocals ((AcyclicSCC l):ls) e ls' = do
+  (vof, t') <- case lBody l of
+      Val e0 -> do
+          e0' <- inferExpr e0
+          t <- realize $ typeOf e0'
+          t' <- generalize t
+          return (Val e0', t')
+      Fun f  -> do
+        f' <- inferFunction f
+        return (Fun f', fType f')
+  scoped [(lName l, t')] $ inferWithSccLocals ls e ((Local t' (lName l) (lDeps l) vof):ls')
+
+typeOfName :: Ident -> Typing Type
+typeOfName x = lookup x >>= instanciate
+
+litType :: Lit -> Typing Type
+litType (LInt _) = return tInt
+litType LUnit = return tUnit
+
+inferExpr :: UExpr -> Typing TExpr
+inferExpr (ELit _ l) = do
+  t <- litType l
+  return $ ELit t l
+inferExpr (ELocal _ x) = (\t -> ELocal t x) <$> (typeOfName x)
+inferExpr (EGlobal _ x) = (\t -> EGlobal t x) <$> (typeOfName x)
+inferExpr (ECons _ x) = (\t -> ECons t x) <$> (typeOfName x)
+inferExpr e@(EIdent _ _) = error $ "EIdent found during type inference: " ++ (show e)
+inferExpr (EBuiltin _ b) = do
+  t <- case b of
+         BAdd -> return $ TFun [tInt, tInt] tInt
+         BEq  -> (\a -> TFun [a, a] tBool) <$> fresh
+  return $ EBuiltin t b
+inferExpr (EApp _ f xs) = do
+  f' <- inferExpr f
+  xs' <- mapM inferExpr xs
+  rt <- fresh
+  unify (typeOf f') (TFun (map typeOf xs') rt)
+  return $ EApp rt f' xs'
+inferExpr (EIf _ e0 e1 e2) = do
+  e0' <- inferExpr e0
+  e1' <- inferExpr e1
+  e2' <- inferExpr e2
+  unify (typeOf e0') tBool
+  unify (typeOf e1') (typeOf e2')
+  return $ EIf (typeOf e1') e0' e1' e2'
+inferExpr (ELet _ ls e) = do
+  let sccs = stronglyConnComp $ map (\l -> (l, lName l, S.toList $ lDeps l)) ls
+  (ls', e') <- inferWithSccLocals sccs e []
+  return $ ELet (typeOf e') ls' e'
+inferExpr (ECase _ e cs) = do
+  e' <- inferExpr e
+  cs' <- mapM inferCase cs
+  rt <- fresh
+  mapM_ (\(Case p _ e0) -> do
+            unify (typeOf p) (typeOf e')
+            unify (typeOf e0) rt)
+    cs'
+  return $ ECase rt e' cs'
+
+inferCase :: UCase -> Typing TCase
+inferCase (Case p vs e) = do
+  vs' <- mapM (\(v, ()) -> ((,) v) <$> fresh) vs
+  scoped (map (\(v, t) -> (v, MonoType t)) vs') $ do
+    p' <- inferPat p
+    e' <- inferExpr e
+    return $ Case p' vs' e'
+
+inferPat :: UPat -> Typing TPat
+inferPat (PHole ()) = PHole <$> fresh
+inferPat (PLit () l) = do
+  t <- litType l
+  return $ PLit t l
+inferPat (PBinding () x) = (\t -> PBinding t x) <$> (typeOfName x)
+inferPat (PCons () c ps) = do
+  ps' <- mapM inferPat ps
+  ct <- typeOfName c
+  t <- fresh
+  case ps of
+    [] -> unify t ct
+    _  -> unify ct (TFun (map typeOf ps') t)
+  return $ PCons t c ps'
+
 infer :: [TypeDef] -> UFunction -> Either TypingError TFunction
 infer tds f = runTyping $ do
     mapM_ introTypeConses tds
@@ -776,74 +918,6 @@ infer tds f = runTyping $ do
     fty <- instanciate $ fType f'
     unify mainTy fty
     realize f'
-  where
-    introTypeConses :: TypeDef -> Typing ()
-    introTypeConses (TypeDef _ (TBCType _)) = return ()
-    introTypeConses (TypeDef t (TBConses cs)) = mapM_ (introTypeCons (TCons t [])) cs
-    introTypeCons :: Type -> TypeCons -> Typing ()
-    introTypeCons t (TypeCons c ts) =
-      let ct = case ts of
-                 [] -> t
-                 ts -> TFun ts t
-      in modify (\s -> s { env = M.insert c (MonoType ct) $ env s })
-    inferFunction f = do
-      prmTys <- mapM (const fresh) $ fArgs f
-      let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
-      e' <- scoped prms $ inferExpr $ fBody f
-      retTy <- fresh
-      unify (typeOf e') retTy
-      fty <- realize $ TFun prmTys retTy
-      fty' <- generalize fty
-      realize $ Function { fName = fName f
-                        , fType = fty'
-                        , fArgs = zip (map fst $ fArgs f) prmTys
-                        , fDeps   = fDeps f
-                        , fBody   = e' }
-    inferWithSccLocals [] e ls' = do
-      e' <- inferExpr e
-      return (reverse ls', e')
-    inferWithSccLocals ((NECyclicSCC xs):ls) e ls' = throwError $ InvalidRecursion $ NE.map lName xs
-    inferWithSccLocals ((AcyclicSCC l):ls) e ls' = do
-      (vof, t') <- case lBody l of
-          Val e0 -> do
-              e0' <- inferExpr e0
-              t <- realize $ typeOf e0'
-              t' <- generalize t
-              return (Val e0', t')
-          Fun f  -> do
-            f' <- inferFunction f
-            return (Fun f', fType f')
-      scoped [(lName l, t')] $ inferWithSccLocals ls e ((Local t' (lName l) (lDeps l) vof):ls')
-    inferExpr (ELit _ l) = do
-      let t = case l of
-                LInt _ -> tInt
-                LUnit  -> tUnit
-      return $ ELit t l
-    inferExpr (EIdent _ x) = do
-      t <- lookup x >>= instanciate
-      return $ EIdent t x
-    inferExpr (EBuiltin _ b) = do
-      t <- case b of
-             BAdd -> return $ TFun [tInt, tInt] tInt
-             BEq  -> (\a -> TFun [a, a] tBool) <$> fresh
-      return $ EBuiltin t b
-    inferExpr (EApp _ f xs) = do
-      f' <- inferExpr f
-      xs' <- mapM inferExpr xs
-      rt <- fresh
-      unify (typeOf f') (TFun (map typeOf xs') rt)
-      return $ EApp rt f' xs'
-    inferExpr (EIf _ e0 e1 e2) = do
-      e0' <- inferExpr e0
-      e1' <- inferExpr e1
-      e2' <- inferExpr e2
-      unify (typeOf e0') tBool
-      unify (typeOf e1') (typeOf e2')
-      return $ EIf (typeOf e1') e0' e1' e2'
-    inferExpr (ELet _ ls e) = do
-      let sccs = stronglyConnComp $ map (\l -> (l, lName l, S.toList $ lDeps l)) ls
-      (ls', e') <- inferWithSccLocals sccs e []
-      return $ ELet (typeOf e') ls' e'
 
 -- ======== Lowering
 
@@ -851,7 +925,6 @@ runLowering :: Lowering a -> a
 runLowering m = fst $ evalRWS m () $
   LoweringSt { lstNext  = 0
              , lstFuncs = []
-             , lstConses = S.empty
              , lstTypeInsts = M.empty
              , lstKnownTypes = M.empty
              , lstFuncInsts = M.empty
@@ -891,19 +964,19 @@ filterVoids = filter (\x -> case x of
                               IRLit IRVoid -> False
                               _            -> True)
 
-
 lowerExpr :: TExpr -> Lowering IRExpr
 lowerExpr e =
   if (typeOf e) == tUnit
   then return $ IRLit IRVoid
   else do
-    conses <- lstConses <$> get
     case e of
       ELit _ (LInt i) -> return $ IRLit $ IRInt i
       EBuiltin t b -> error $ "Bare operatior: " ++ (show e)
-      EIdent t x | x `S.member` conses -> return $ IRCons x []
-      EIdent t x -> return $ IRVar x
-      EApp _ (EIdent _ x) xs | x `S.member` conses -> do
+      ECons t x -> return $ IRCons x []
+      ELocal t x -> return $ IRVar x
+      EGlobal t x -> return $ IRVar x
+      EIdent _ _ -> error $ "EIdent found during lowering: " ++ (show e)
+      EApp _ (ECons _ x) xs -> do
         xs' <- mapM lowerExpr xs
         return $ IRCons x xs'
       EApp t (EBuiltin bt b) xs -> do
@@ -996,18 +1069,12 @@ lowerFunction f = do
   modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
   return f'
 
-registerConses :: [Ident] -> Lowering ()
-registerConses cs =
-  modify (\s -> s { lstConses = (lstConses s) `S.union` (S.fromList cs) })
-
 lowerType :: TypeDef -> Lowering IRTypeDef
 lowerType (TypeDef n (TBCType ct)) = return $ IRCType n ct
 lowerType (TypeDef _ (TBConses [])) = error $ "Zero types are not supported yet"
 lowerType (TypeDef n (TBConses [(TypeCons c ts)])) = do
-  registerConses [c]
   return $ IRStructType n c ts
 lowerType (TypeDef n (TBConses cs)) = do
-  registerConses $ map (\(TypeCons c _) -> c) cs
   if allTags
   then return $ IREnumType n $ reverse variants
   else return $ IRTaggedType n cs

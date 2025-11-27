@@ -6,9 +6,11 @@
            | None
 
 if wow ($$eq 11 (k 3)) () (id qq)
-then (s | Some x -> x
-        | None   -> 0
-      . s = Some 3)
+then (Some 3) | None -> 0
+              | Some x -> x
+-- (s | Some x -> x
+--        | None   -> 0
+--      . s = Some 3)
 else -100
 . qq = ()
 . wow x y z = x

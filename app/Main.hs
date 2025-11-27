@@ -3,7 +3,11 @@ module Main (main) where
 
 -- NEXT:
 -- - Simple destructuring
+--   - Inference
+--   - Lowering
+--   - Emission
 -- TODO:
+-- - Duplicate name check
 -- - Nested destructuring
 -- - - Guards?
 -- - Zero types
@@ -72,7 +76,8 @@ class Substitutable a where
 
 data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
   deriving (Show)
-data TypeBody = TypeBody [TypeCons]
+data TypeBody = TBConses [TypeCons]
+              | TBCType Text
   deriving (Show)
 data TypeDef = TypeDef { tdName :: Ident, tdBody :: TypeBody }
   deriving (Show)
@@ -118,6 +123,12 @@ data Lit = LInt Integer
          | LUnit
          deriving Show
 
+data Pat t = PHole t
+           | PLit t Lit
+           | PBinding t Ident
+           | PCons t Ident [Pat t]
+  deriving (Show, Functor, Foldable)
+
 data Expr t = ELit t Lit
             | ETup t [Expr t]
             | EBuiltin t Builtin
@@ -125,6 +136,12 @@ data Expr t = ELit t Lit
             | EApp t (Expr t) [Expr t]
             | ELet t [Local t] (Expr t)
             | EIf t (Expr t) (Expr t) (Expr t)
+            | ECase t (Expr t) [(Pat t, Expr t)]
+            -- Never parsed:
+            | ELocal t Ident
+            -- | ECapture t Ident
+            | EGlobal t Ident
+            | ECons t Ident
     deriving (Show, Functor, Foldable)
 
 type TyVar = Int
@@ -159,8 +176,13 @@ data TypingError = UnificationError Type Type
 
 type Typing = StateT TypingSt (Except TypingError)
 
+data NameKind = NKLocal Int
+              | NKGlobal
+              | NKCons
+  deriving Show
+
 data NameEntry = NameEntry { neName  :: Ident
-                           , neDepth :: Int }
+                           , neKind  :: NameKind }
   deriving Show
 
 type NameMap = M.HashMap Ident NameEntry
@@ -175,15 +197,19 @@ data NamingSt = NamingSt { nstNext   :: Int
 data NamingError = UndefinedName Ident
                  | UndefinedType Ident
                  | InvalidCapture Ident
+                 | DuplicateNames [Ident]
+                 | InvalidPattern UPat
   deriving Show
 
 type Naming = StateT NamingSt (Except NamingError)
 
 type UProgram  = Program ()
+type UPat      = Pat ()
 type UExpr     = Expr ()
 type UFunction = Function ()
 
 type TProgram  = Program Type
+type Tpat      = Pat Type
 type TExpr     = Expr Type
 type TFunction = Function Type
 
@@ -200,6 +226,7 @@ type IRType = Type
 data IRTypeDef = IREnumType Ident [Ident]
                | IRStructType Ident Ident [Type]
                | IRTaggedType Ident [TypeCons]
+               | IRCType Ident Text
                deriving Show
 
 data IRLit = IRInt Integer
@@ -312,28 +339,38 @@ pIdent = mkId <$> (lexeme pIdent')
 pInteger :: Parser Integer
 pInteger = lexeme $ L.signed (return ()) L.decimal
 
-pBuiltin :: Parser Builtin
-pBuiltin = try $ do
+pMagic :: (Text -> Maybe a) -> Parser a
+pMagic p = try $ do
   o <- getOffset
-  x <- string "$$" *> pIdent
-  case x of
-    Ident "add" Nothing Nothing -> return BAdd
-    Ident "eq" Nothing Nothing  -> return BEq
-    _                           -> do
+  x <- string "$$" *> (lexeme pIdent')
+  case p x of
+    Just r -> return r
+    _ -> do
       setOffset o
-      customFailure $ InvalidBuiltin x
+      customFailure $ InvalidBuiltin $ mkId x
+
+pBuiltin :: Parser Builtin
+pBuiltin = pMagic $ \x ->
+  case x of
+    "add" -> Just BAdd
+    "eq"  -> Just BEq
+    _     -> Nothing
+
+pLit :: Parser Lit
+pLit =  (try $ symbol "(" *> symbol ")" *> (return LUnit))
+    <|> (try $ LInt <$> pInteger)
 
 pExpr0 :: Parser UExpr
-pExpr0 =  pParenTupleOrUnit
-      <|> (((ELit ()) . LInt) <$> pInteger)
-      <|> ((EIdent ())        <$> pIdent)
-      <|> ((EBuiltin ())      <$> pBuiltin)
+pExpr0 =  ((ELit ()) <$> pLit)
+      <|> pParenTupleOrUnit
+      <|> ((EIdent ()) <$> pIdent)
+      <|> ((EBuiltin ()) <$> pBuiltin)
       <|> ((EIf ()) <$> ((symbol "if")   *> pExpr1)
                     <*> ((symbol "then") *> pExpr1)
                     <*> ((symbol "else"  *> pExpr1)))
   where
     pParenTupleOrUnit = do
-      es <- pParens $ pExpr `sepBy` (symbol ",")
+      es <- pParens $ pExpr `sepBy1` (symbol ",")
       return $
         case es of
             []  -> ELit () LUnit
@@ -352,6 +389,17 @@ pExpr1 = do
 pExpr2 :: Parser UExpr
 pExpr2 = do
   e <- pExpr1
+  cases <- many pCase
+  case cases of
+    [] -> return e
+    _ -> return $ ECase () e cases
+  where
+    pCase = (,) <$> (symbol "|" *> pPat) <*> (symbol "->" *> pExpr1)
+
+
+pExpr3 :: Parser UExpr
+pExpr3 = do
+  e <- pExpr2
   bs <- many pBinding
   return $
     case bs of
@@ -361,7 +409,7 @@ pExpr2 = do
     pBinding = do
       x    <- symbol "." *> pIdent
       args <- many pIdent
-      body <- symbol "=" *> pExpr1
+      body <- symbol "=" *> pExpr2
       return $
         if null args
         then Local (MonoType ()) x (S.empty) $ Val body
@@ -369,7 +417,17 @@ pExpr2 = do
                Fun $ Function x (MonoType ()) (zip args $ repeat ()) (S.empty) body
 
 pExpr :: Parser UExpr
-pExpr = pExpr2
+pExpr = pExpr3
+
+pPat' :: Parser UPat
+pPat' =  (symbol "_" *> (return $ PHole ()))
+     <|> ((PLit ()) <$> pLit)
+     <|> (pParens pPat)
+     <|> ((PBinding ()) <$> pIdent)
+
+pPat :: Parser UPat
+pPat =  ((PCons ()) <$> pIdent <*> (many pPat'))
+    <|> pPat'
 
 pType' :: Parser Type
 pType' = pParenOrUnit
@@ -396,10 +454,13 @@ pTypeDef :: Parser TypeDef
 pTypeDef = do
   symbol ":"
   x <- pIdent
-  b <- optional $ do
-    symbol "="
-    many (TypeCons <$> (symbol "|" *> pIdent) <*> (many pType'))
-  return $ TypeDef x $ TypeBody $ fromMaybe [] b
+  b <- optional $ symbol "=" >> pDefOrCType
+  return $ TypeDef x $ fromMaybe (TBConses []) b
+  where
+    pDefOrCType =
+      -- TODO: Should be a string
+      (TBCType <$> (pMagic (\x -> if x == "ctype" then Just () else Nothing) >> (lexeme pIdent')))
+      <|> (TBConses <$> (many (TypeCons <$> (symbol "|" *> pIdent) <*> (many pType'))))
 
 pProgram :: Parser UProgram
 pProgram = sc *> (Program <$> (many pTypeDef) <*> pExpr) <* eof
@@ -438,10 +499,55 @@ scopedVars' :: [Ident] -> Naming a -> Naming ([Ident], a)
 scopedVars' xs m = do
     d <- nstDepth <$> get
     xs' <- mapM uniqId xs
-    scoped (map (\(x, x') -> (x, NameEntry x' d)) $ zip xs xs') $ ((,) xs') <$> m
+    scoped (map (\(x, x') -> (x, NameEntry x' (NKLocal d))) $ zip xs xs') $ ((,) xs') <$> m
 
 scopedVars :: [Ident] -> Naming a -> Naming a
 scopedVars xs m = snd <$> scopedVars' xs m
+
+checkLocals :: [Local ()] -> UExpr -> Naming UExpr
+checkLocals ls e = do
+  (ls', e') <- scopedVars (map (\(Local { lName = x }) -> x) ls) $ do
+    ls' <- mapM checkLocal ls
+    e' <- checkExpr e
+    return (ls', e')
+  return $ ELet () ls' e'
+checkLocal (Local t x _ (Val e)) = do
+  (NameEntry x' _) <- lookup x
+  (e', deps) <- block $ checkExpr e
+  return $ Local t x' deps (Val e')
+checkLocal (Local t x _ (Fun f)) = do
+   (NameEntry x' _) <- lookup x
+   f <- checkFunction x' (map fst $ fArgs f) (fBody f)
+   return $ Local t x' (S.empty) (Fun f)
+
+checkPat :: UPat -> Naming (UPat, (Set Ident))
+checkPat (PBinding () x) = do
+  mX' <- tryLookup x
+  case mX' of
+    Just (NameEntry _ NKCons) -> return $ (PCons () x [], S.empty)
+    _ -> return $ (PBinding () x, S.singleton x)
+checkPat p@(PCons () x ps) = do
+   mK <- tryLookup x
+   case mK of
+     Just (NameEntry _ NKCons) -> do
+       (ps', vss) <- unzip <$> mapM checkPat ps
+       let vs = S.unions vss
+       -- TODO: Actual find which names are duplicated
+       when (S.size vs /= sum (map S.size vss)) $
+         throwError $ DuplicateNames $ S.toList vs
+       return $ (PCons () x ps', vs)
+     _ ->
+       -- A undefined nilary constructor? It's actually a binding!
+       if null ps
+       then return $ (PBinding () x, S.singleton x)
+       else throwError $ InvalidPattern p
+checkPat p = return (p, S.empty)
+
+checkCase :: (UPat, UExpr) -> Naming (UPat, UExpr)
+checkCase (p, e) = do
+  (p', vs) <- checkPat p
+  e' <- scopedVars (S.toList vs) $ checkExpr e
+  return (p', e')
 
 checkExpr :: UExpr -> Naming UExpr
 checkExpr e =
@@ -450,10 +556,11 @@ checkExpr e =
       ne <- lookup x
       curDepth <- nstDepth <$> get
       addDeps $ neName ne
-      let d = neDepth ne
-      if d /= curDepth && d > 0
-      then throwError $ InvalidCapture (neName ne)
-      else return $ EIdent () (neName ne)
+      case neKind ne of
+        NKLocal d | d /= curDepth -> throwError $ InvalidCapture (neName ne)
+        NKLocal _ -> return $ ELocal () (neName ne)
+        NKGlobal  -> return $ EGlobal () (neName ne)
+        NKCons    -> return $ ECons () (neName ne)
     EApp () f xs -> (EApp ()) <$> (checkExpr f) <*> (mapM checkExpr xs)
     ELet () bs e -> checkLocals bs e
     EIf () e0 e1 e2 -> do
@@ -461,23 +568,11 @@ checkExpr e =
        e1' <- checkExpr e1
        e2' <- checkExpr e2
        return $ EIf () e0' e1' e2'
+    ECase () e cs -> do
+      e' <- checkExpr e
+      cs' <- mapM checkCase cs
+      return $ ECase () e' cs'
     _ -> return e
-  where
-    checkLocals :: [Local ()] -> UExpr -> Naming UExpr
-    checkLocals ls e = do
-      (ls', e') <- scopedVars (map (\(Local { lName = x }) -> x) ls) $ do
-        ls' <- mapM checkLocal ls
-        e' <- checkExpr e
-        return (ls', e')
-      return $ ELet () ls' e'
-    checkLocal (Local t x _ (Val e)) = do
-      (NameEntry x' _) <- lookup x
-      (e', deps) <- block $ checkExpr e
-      return $ Local t x' deps (Val e')
-    checkLocal (Local t x _ (Fun f)) = do
-       (NameEntry x' _) <- lookup x
-       f <- checkFunction x' (map fst $ fArgs f) (fBody f)
-       return $ Local t x' (S.empty) (Fun f)
 
 checkFunction :: Ident -> [Ident] -> UExpr -> Naming UFunction
 checkFunction f xs e = do
@@ -500,12 +595,13 @@ checkType (TCons x ts) = do
 checkType (TFun ts t) = (checkType t) >> (mapM_ checkType ts)
 
 checkTypeDef :: TypeDef -> Naming ()
-checkTypeDef (TypeDef x (TypeBody cs)) = do
+checkTypeDef (TypeDef _ (TBCType _)) = return ()
+checkTypeDef (TypeDef x (TBConses cs)) = do
   mapM_ checkAndIntroCons cs
   where
     checkAndIntroCons (TypeCons c ts) = do
       mapM_ checkType ts
-      modify (\s -> s { nstScope = M.insert c (NameEntry c 0) $ nstScope s })
+      modify (\s -> s { nstScope = M.insert c (NameEntry c NKCons) $ nstScope s })
 
 checkTypeDefs :: [TypeDef] -> Naming ()
 checkTypeDefs tds = do
@@ -682,7 +778,8 @@ infer tds f = runTyping $ do
     realize f'
   where
     introTypeConses :: TypeDef -> Typing ()
-    introTypeConses (TypeDef t (TypeBody cs)) = mapM_ (introTypeCons (TCons t [])) cs
+    introTypeConses (TypeDef _ (TBCType _)) = return ()
+    introTypeConses (TypeDef t (TBConses cs)) = mapM_ (introTypeCons (TCons t [])) cs
     introTypeCons :: Type -> TypeCons -> Typing ()
     introTypeCons t (TypeCons c ts) =
       let ct = case ts of
@@ -904,11 +1001,12 @@ registerConses cs =
   modify (\s -> s { lstConses = (lstConses s) `S.union` (S.fromList cs) })
 
 lowerType :: TypeDef -> Lowering IRTypeDef
-lowerType (TypeDef _ (TypeBody [])) = error $ "Zero types are not supported yet"
-lowerType (TypeDef n (TypeBody [(TypeCons c ts)])) = do
+lowerType (TypeDef n (TBCType ct)) = return $ IRCType n ct
+lowerType (TypeDef _ (TBConses [])) = error $ "Zero types are not supported yet"
+lowerType (TypeDef n (TBConses [(TypeCons c ts)])) = do
   registerConses [c]
   return $ IRStructType n c ts
-lowerType (TypeDef n (TypeBody cs)) = do
+lowerType (TypeDef n (TBConses cs)) = do
   registerConses $ map (\(TypeCons c _) -> c) cs
   if allTags
   then return $ IREnumType n $ reverse variants
@@ -1079,6 +1177,12 @@ emitStruct n ts = do
   line ";"
 
 emitTypeDef :: IRTypeDef -> Emitter ()
+emitTypeDef (IRCType t ct) = do
+  emit "typedef "
+  emit ct
+  emit " "
+  emitIdent t
+  line ";\n"
 emitTypeDef (IRStructType t c mts) = do
   emit "typedef "
   emitStruct t mts
@@ -1101,9 +1205,9 @@ emitTypeDef (IRTaggedType t cs) = do
   emit " "
   emitIdent t
   line ";\n"
-  where
 
 emitConses :: IRTypeDef -> Emitter ()
+emitConses (IRCType _ _) = return ()
 emitConses (IREnumType t variants) = do
   mapM_ (\v -> do
             emit "#define MK_"

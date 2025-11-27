@@ -1,12 +1,15 @@
 -- Test program:
+: CInt64 = $$ctype int64_t
 : Pos = | Pos int int
 : MyBool = | True | False
 : OptInt = | Some int
            | None
 
 if wow ($$eq 11 (k 3)) () (id qq)
-then Some 3
-else None
+then (s | Some x -> x
+        | None   -> 0
+      . s = Some 3)
+else -100
 . qq = ()
 . wow x y z = x
 . x = $$add ($$add 1 1) ($$add 2 3)

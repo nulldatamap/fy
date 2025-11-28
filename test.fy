@@ -1,16 +1,20 @@
 -- Test program:
 : CInt64 = $$ctype int64_t
 : Pos = | Pos int int
+: Rect = | Rect Pos Pos
 : MyBool = | True | False
 : OptInt = | Some int
            | None
+: Bar = | High int
+        | Low OptInt
+: Foo = | Foo Bar
+        | Foo2 Bar Bar
+        | Foone
 
-if wow ($$eq 11 (k 3)) () (id qq)
-then (Some 3) | None -> 0
-              | Some x -> x
--- (s | Some x -> x
---        | None   -> 0
---      . s = Some 3)
+if $$eq 1 1
+then (Foo2 (High 3)
+           (Low None))
+     | (Foo2 (High x) z) -> x
 else -100
 . qq = ()
 . wow x y z = x

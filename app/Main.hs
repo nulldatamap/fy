@@ -2,14 +2,10 @@
 module Main (main) where
 
 -- NEXT:
--- - Simple destructuring
---   - Inference
---   - Lowering
---   - Emission
+-- - Fix parsing
 -- TODO:
 -- - Duplicate name check
--- - Nested destructuring
--- - - Guards?
+-- - Guards?
 -- - Zero types
 -- - Tuples
 -- - Function pointer types
@@ -36,7 +32,7 @@ import Data.Hashable (Hashable)
 import Data.Set (Set)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition)
+import Data.List (intersperse, intercalate, partition, find)
 import Data.Maybe (fromMaybe, maybeToList)
 import Data.Char
 import Control.Monad (when, foldM, unless)
@@ -226,13 +222,17 @@ type Emitter a = RWS Identation [Text] () a
 
 data Operator = OpAdd
               | OpEq
+              | OpAnd
               deriving (Show, Eq)
 
 type IRType = Type
 
+data IRRecord = IRRecord Ident [(Type, Ident)]
+  deriving (Show)
+
 data IRTypeDef = IREnumType Ident [Ident]
-               | IRStructType Ident Ident [Type]
-               | IRTaggedType Ident [TypeCons]
+               | IRStructType Ident IRRecord
+               | IRTaggedType Ident [IRRecord]
                | IRCType Ident Text
                deriving Show
 
@@ -243,8 +243,10 @@ data IRLit = IRInt Integer
 data IRExpr = IRVar Ident
             | IROp Operator [IRExpr]
             | IRCall Ident [IRExpr]
-            | IRCons Ident [IRExpr]
+            | IRCons Ident Ident [IRExpr]
             | IRLit IRLit
+            | IRField IRExpr Ident
+            | IRCheckVariant IRExpr Ident Ident
             deriving (Show)
 
 data IRStmt = IRDef IRType Ident (Maybe IRExpr)
@@ -252,6 +254,7 @@ data IRStmt = IRDef IRType Ident (Maybe IRExpr)
             | IREval IRExpr
             | IRReturn IRExpr
             | IRIf IRExpr [IRStmt] [IRStmt]
+            | IRPanic Text
             deriving (Show)
 
 data IRFunc = IRFunc { irfName  :: Ident
@@ -266,7 +269,7 @@ data IRProgram = IRProgram { irpTypes :: [IRTypeDef], irpFuncs :: [IRFunc] }
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
                              , lstKnownTypes :: M.HashMap Ident TypeDef
-                             , lstTypeInsts  :: M.HashMap (Ident, Type) IRTypeDef
+                             , lstTypeInsts  :: M.HashMap Type IRTypeDef
                              , lstKnownFuncs :: M.HashMap Ident TFunction
                              , lstFuncInsts  :: M.HashMap (Ident, Type) IRFunc }
 
@@ -302,6 +305,24 @@ class (Hashable k, Monad m, MonadError e m) => Context m k v e
 
 mkId :: Text -> Ident
 mkId x = Ident x Nothing Nothing
+
+canonicalId :: Ident -> Text
+canonicalId (Ident n ns id) = T.concat $ prefix ++ (n : suffix)
+  where
+    prefix = fromMaybe [] $ fmap (\ns -> ["__", ns, "_"]) ns
+    suffix = fromMaybe [] $ fmap (\id -> ["_", T.pack $ show id]) id
+
+enumeratedIds :: Text -> [Ident]
+enumeratedIds s = map (\i -> Ident s Nothing (Just i)) [0..]
+
+unnamedFields :: [Ident]
+unnamedFields = enumeratedIds ""
+
+variantField :: Ident
+variantField = mkId "__variant"
+
+variant :: Ident -> Ident -> Ident
+variant t x = Ident (canonicalId x) (Just $ canonicalId t) Nothing
 
 suffixId :: Ident -> Text -> Ident
 suffixId (Ident x ns i) s = Ident (T.append x s) ns i
@@ -694,6 +715,10 @@ instance Substitutable TFunction  where
                 , fType = subst s $ fType f
                 , fArgs = map (\(x, t) -> (x, subst s t)) $ fArgs f }
 
+typeName (TVar i) = Ident "'t" Nothing (Just i)
+typeName (TCons c _) = c
+typeName (TFun xs _) = mkId $ T.pack $ replicate (length xs) ',' ++ "->"
+
 defaultTypingSt :: TypingSt
 defaultTypingSt = TypingSt { nextId = 0
                            , currentSubst = Subst M.empty
@@ -964,21 +989,25 @@ filterVoids = filter (\x -> case x of
                               IRLit IRVoid -> False
                               _            -> True)
 
+lowerLit :: Lit -> IRLit
+lowerLit (LInt i) = IRInt i
+lowerLit LUnit = IRVoid
+
 lowerExpr :: TExpr -> Lowering IRExpr
 lowerExpr e =
   if (typeOf e) == tUnit
   then return $ IRLit IRVoid
   else do
     case e of
-      ELit _ (LInt i) -> return $ IRLit $ IRInt i
+      ELit _ l -> return $ IRLit $ lowerLit l
       EBuiltin t b -> error $ "Bare operatior: " ++ (show e)
-      ECons t x -> return $ IRCons x []
+      ECons t x -> return $ IRCons (typeName t) x []
       ELocal t x -> return $ IRVar x
       EGlobal t x -> return $ IRVar x
       EIdent _ _ -> error $ "EIdent found during lowering: " ++ (show e)
-      EApp _ (ECons _ x) xs -> do
+      EApp t (ECons _ x) xs -> do
         xs' <- mapM lowerExpr xs
-        return $ IRCons x xs'
+        return $ IRCons (typeName t) x xs'
       EApp t (EBuiltin bt b) xs -> do
         xs' <- filterVoids <$> mapM lowerExpr xs
         let o = case b of
@@ -1008,6 +1037,68 @@ lowerExpr e =
           tell [ IRSet r e2' ]
         tell [ IRIf e0' sts1 sts2 ]
         return $ IRVar r
+      ECase t e cs -> do
+        e' <- lowerExpr e
+        x <- case e' of
+             IRVar x -> return x
+             _ -> do
+               x <- newVar' (Just "_matchee")
+               tell [ IRDef (typeOf e) x $ Just e' ]
+               return $ x
+        lowerCases x t cs
+
+lookupTypeDef :: Type -> Lowering IRTypeDef
+lookupTypeDef t@(TVar _) = error $ "Type variable during lowering: " ++ (show t)
+lookupTypeDef t@(TFun _ _) = error $ "Tried to lookup a function type: " ++ (show t)
+lookupTypeDef t@(TCons c []) = do
+  tds <- lstTypeInsts <$> get
+  case M.lookup t tds of
+    Nothing -> error $ "Couldn't resolve type: " ++ (show t)
+    Just td -> return td
+lookupTypeDef t = error $ "Parametric types are not yet supported: " ++ (show t)
+
+lowerCases :: Ident -> IRType -> [TCase] -> Lowering IRExpr
+lowerCases x t cs = do
+  r <- newVar' (Just "_phi")
+  irDef t r Nothing
+  makeIfElseChain =<< mapM (lowerCase r) cs
+  return $ IRVar r
+  where
+    lowerCase r (Case p vs e) = do
+      (eCs, bs) <- lowerPattern p (IRVar x) []
+      (_, sts) <- stmts $ do
+         e' <- lowerExpr e
+         tell [ IRSet r e' ]
+      return (eCs, bs ++ sts)
+    lowerPattern :: TPat -> IRExpr -> [IRStmt] -> Lowering ([IRExpr], [IRStmt])
+    lowerPattern (PHole _) path bs = return ([], bs)
+    lowerPattern (PLit _ l) path bs = return ([IROp OpEq [path, IRLit $ lowerLit l]], bs)
+    lowerPattern (PBinding t x) path bs = return ([], bs ++ [IRDef t x $ Just path])
+    lowerPattern (PCons t c ps) path bs = do
+      td <- lookupTypeDef t
+      case td of
+        IRCType _ _ -> error $ "Tried to match a ctype with a constructor? " ++ (show c) ++ " : " ++ (show t)
+        IREnumType t _ -> return ([IROp OpEq [path, IRCons t c []]], bs)
+        IRStructType _ (IRRecord _ fs) -> lowerRecordPattern ps bs path fs
+        IRTaggedType t rs -> do
+          case find (\(IRRecord c0 _) -> c == c0) rs of
+            Nothing -> error $ "Couldn't find constructor `" ++ (show c) ++ "` in type: " ++ (show t)
+            Just (IRRecord _ fs) -> do
+              (cs, bs') <- lowerRecordPattern ps bs (IRField path c) fs
+              return ((IRCheckVariant path t c):cs, bs')
+      where
+        lowerRecordPattern ps bs path fs =
+          foldM (\(cs, bs) ((_, f), p) -> do
+                    (cs', bs') <- lowerPattern p (IRField path f) bs
+                    return (cs ++ cs', bs'))
+            ([], bs)
+            (zip fs ps)
+    makeIfElseChain [([], body)] = tell body
+    makeIfElseChain [] = tell [ IRPanic "Uncovered match case" ]
+    makeIfElseChain ((eCs, body):xs) = do
+      (_, sts2) <- stmts $ makeIfElseChain xs
+      tell [ IRIf (IROp OpAnd eCs) body sts2 ]
+
 
 lowerBody :: TExpr -> Lowering ()
 lowerBody b = do
@@ -1070,17 +1161,24 @@ lowerFunction f = do
   return f'
 
 lowerType :: TypeDef -> Lowering IRTypeDef
-lowerType (TypeDef n (TBCType ct)) = return $ IRCType n ct
-lowerType (TypeDef _ (TBConses [])) = error $ "Zero types are not supported yet"
-lowerType (TypeDef n (TBConses [(TypeCons c ts)])) = do
-  return $ IRStructType n c ts
-lowerType (TypeDef n (TBConses cs)) = do
+lowerType td@(TypeDef n _) = do
+  x <- lowerType' td
+  modify (\s -> s { lstTypeInsts = M.insert (TCons n []) x $ lstTypeInsts s })
+  return x
+lowerType' :: TypeDef -> Lowering IRTypeDef
+lowerType' (TypeDef n (TBCType ct)) = return $ IRCType n ct
+lowerType' (TypeDef _ (TBConses [])) = error $ "Zero types are not supported yet"
+lowerType' (TypeDef n (TBConses [(TypeCons c ts)])) = do
+  let r = IRRecord c $ zip ts unnamedFields
+  return $ IRStructType n r
+lowerType' (TypeDef n (TBConses cs)) = do
   if allTags
   then return $ IREnumType n $ reverse variants
-  else return $ IRTaggedType n cs
+  else return $ IRTaggedType n rs
   where
     (allTags, variants) =
       foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), v : vs)) (True, []) cs
+    rs = map (\(TypeCons c ts) -> IRRecord c $ zip ts unnamedFields) cs
 
 lowerProgram :: [TypeDef] -> TFunction -> Lowering IRProgram
 lowerProgram types f = do
@@ -1139,6 +1237,7 @@ braceBlock m = do
 emitProgram :: IRProgram -> Text
 emitProgram p = runEmitter $ do
   lines [ "#include <stdio.h>"
+        , "#include <stdlib.h>"
         , "#include <stdbool.h>"
         , ""
         ]
@@ -1182,8 +1281,14 @@ emitStmt (IRIf e0 sts1 sts2) = do
   emitExpr e0
   emit ") "
   braceBlock $ emitStmts sts1
-  indent >> emit " else "
-  braceBlock $ emitStmts sts2
+  emit " else "
+  case sts2 of
+    [s@(IRIf _ _ _)] -> emitStmt s
+    _ -> braceBlock $ emitStmts sts2
+emitStmt (IRPanic msg) = do
+  emit "/* PANIC! */ printf(\""
+  emit msg
+  emit "\"); exit(1); "
 
 emitExpr :: IRExpr -> Emitter ()
 emitExpr (IRVar x) = emitIdent x
@@ -1191,24 +1296,39 @@ emitExpr (IRLit l) =
   case l of
     IRInt x -> emit $ T.pack $ show x
     IRVoid -> emit "/*void*/"
+emitExpr (IROp OpAnd []) = emit "1"
+emitExpr (IROp OpAnd [x]) = emitExpr x
+emitExpr (IROp OpAnd xs) = seperated " && " emitExpr xs
 emitExpr (IROp o [x, y]) =
     case o of
         OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
         OpEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
-emitExpr (IRCons x es) = do
+emitExpr (IRCons t x es) = do
   emit "MK_"
+  emitIdent t
+  emit "_"
   emitIdent x
   parens $ seperated ", " emitExpr es
 emitExpr (IRCall x es) = do
   emitIdent x
   parens $ seperated ", " emitExpr es
+emitExpr (IRField e f) = do
+  let mParen = case e of
+                 IRField _ _ -> id
+                 IRVar _     -> id
+                 _           -> parens
+  mParen $ emitExpr e
+  emit "."
+  emitIdent f
+emitExpr (IRCheckVariant e t v) = do
+  parens $ do
+    emitExpr (IRField e variantField)
+    emit " == "
+    emitIdent $ variant t v
 
 emitIdent :: Ident -> Emitter ()
-emitIdent (Ident n ns id) = do
-  mapM_ (\ns -> tell ["__", ns, "_"]) ns
-  emit n
-  mapM_ (\id -> tell ["_", T.pack $ show id]) id
+emitIdent x = emit $ canonicalId x
 
 emitType :: IRType -> Emitter ()
 emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
@@ -1218,27 +1338,28 @@ emitType (TCons (Ident "()" Nothing Nothing) []) = emit "void"
 emitType (TCons x []) = emitIdent x
 emitType t = error $ "Unsupported type: " ++ (show t)
 
-emitEnum :: Ident -> [Ident] -> Emitter ()
-emitEnum t vs = do
+emitEnum :: Ident -> Bool -> [Ident] -> Emitter ()
+emitEnum t isVariant vs = do
     indent
     emit "typedef enum "
     braceBlock $ do
-      mapM_ (\n -> indent >> (emitIdent n) >> line ",") vs
+      mapM_ (\n -> indent >> (emitIdent $ variant t n) >> line ",") vs
     emit " "
     emitIdent t
+    when isVariant $ emit "__variant"
     line ";\n"
-emitStruct :: Ident -> [Type] -> Emitter ()
-emitStruct n ts = do
+emitStruct :: Ident -> IRRecord -> Emitter ()
+emitStruct n (IRRecord c fs) = do
   indent
   emit "struct "
   braceBlock $ do
-      mapM_ (\(i, mt) -> do
+      mapM_ (\(t, f) -> do
               indent
-              emitType mt
+              emitType t
               emit " "
-              emit $ T.pack $ '_' : (show i)
+              emitIdent f
               line ";")
-        (zip [0 :: Int ..] ts)
+        fs
   emit " "
   emitIdent n
   line ";"
@@ -1250,24 +1371,25 @@ emitTypeDef (IRCType t ct) = do
   emit " "
   emitIdent t
   line ";\n"
-emitTypeDef (IRStructType t c mts) = do
+emitTypeDef (IRStructType t r) = do
   emit "typedef "
-  emitStruct t mts
+  emitStruct t r
   line ""
-emitTypeDef (IREnumType t variants) = emitEnum t variants
-emitTypeDef (IRTaggedType t cs) = do
-  let varTy = (t `suffixId` "__variant")
-  emitEnum varTy $ map (\(TypeCons v _) -> v) cs
+emitTypeDef (IREnumType t variants) = emitEnum t False variants
+emitTypeDef (IRTaggedType t rs) = do
+  emitEnum t True $ map (\(IRRecord v _) -> v) rs
   indent
   emit "typedef struct "
   braceBlock $ do
     indent
-    emitIdent varTy
-    line " __variant;"
+    emitIdent t
+    emit "__variant "
+    emitIdent variantField
+    line ";"
     indent
     emit "union "
     braceBlock $
-      mapM_ (\(TypeCons c mts) -> emitStruct c mts) cs
+      mapM_ (\r@(IRRecord c _) -> emitStruct c r) rs
     line ";"
   emit " "
   emitIdent t
@@ -1278,32 +1400,40 @@ emitConses (IRCType _ _) = return ()
 emitConses (IREnumType t variants) = do
   mapM_ (\v -> do
             emit "#define MK_"
+            emitIdent t
+            emit "_"
             emitIdent v
             emit "() "
-            emitIdent v
+            emitIdent $ variant t v
             line "") variants
   line ""
-emitConses (IRStructType t c ts) = do
+emitConses (IRStructType t (IRRecord c fs)) = do
   emit "#define MK_"
+  emitIdent t
+  emit "_"
   emitIdent c
-  let args = map (\(i, _) -> Ident "__arg" Nothing (Just i)) $ zip [0 :: Int ..] ts
+  let args = take (length fs) $ enumeratedIds "__arg"
   parens $ seperated ", " emitIdent args
   emit " "
   parens $ emitIdent t
   emit " {"
   seperated ", " emitIdent args
   line " }\n"
-emitConses (IRTaggedType t cs) = mapM_ emitCons cs >> line ""
+emitConses (IRTaggedType t rs) = mapM_ emitCons rs >> line ""
   where
-    emitCons (TypeCons c ts) = do
+    emitCons (IRRecord c fs) = do
       emit "#define MK_"
+      emitIdent t
+      emit "_"
       emitIdent c
-      let args = map (\(i, _) -> Ident "__arg" Nothing (Just i)) $ zip [0 :: Int ..] ts
+      let args = take (length fs) $ enumeratedIds "__arg"
       parens $ seperated ", " emitIdent args
       emit " "
       parens $ emitIdent t
-      emit " {.__variant = "
-      emitIdent c
+      emit " {."
+      emitIdent variantField
+      emit " = "
+      emitIdent $ variant t c
       emit ", ."
       emitIdent c
       emit " = {"

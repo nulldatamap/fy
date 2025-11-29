@@ -1,35 +1,19 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Fy.Typing
   ( runTyping, unify, realize, instanciate, generalize
   , infer
   ) where
 
+
 import Fy.Types
 import Fy.Ast
 
-import Debug.Trace (trace, traceStack)
-import GHC.Stack (HasCallStack, prettyCallStack, callStack)
-
 import Prelude hiding (lookup, lines)
-import GHC.Generics (Generic)
-import System.Exit
-import System.Environment
-import System.Process hiding (env)
-import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Data.Set as S
-import Data.Hashable (Hashable)
-import Data.Set (Set)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe, maybeToList)
-import Data.Char
-import Control.Monad (when, foldM, unless)
+import Control.Monad (when)
 import Control.Monad.State
 import Control.Monad.Except
-import Control.Monad.RWS
 import Data.Graph (stronglyConnComp, SCC(..))
 import qualified Data.HashMap.Strict as M
 
@@ -74,7 +58,6 @@ fresh = TVar <$> fresh'
   let t = sub `subst` t'
   when (x `elem` (freeVars t)) $ throwError OccursCheck
   let x' = sub `subst` (TVar x)
-  let sub = currentSubst st
   case x' of
     TVar y | x == y -> return ()
     _ -> x' `unify` t
@@ -131,9 +114,11 @@ introTypeCons :: Type -> TypeCons -> Typing ()
 introTypeCons t (TypeCons c ts) =
   let ct = case ts of
              [] -> t
-             ts -> TFun ts t
+             _ -> TFun ts t
   in modify (\s -> s { env = M.insert c (MonoType ct) $ env s })
 
+
+inferFunction :: UFunction -> Typing TFunction
 inferFunction f = do
   prmTys <- mapM (const fresh) $ fArgs f
   let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
@@ -148,10 +133,11 @@ inferFunction f = do
                     , fDeps   = fDeps f
                     , fBody   = e' }
 
+inferWithSccLocals :: [SCC (Local ())] -> UExpr -> [Local Type] -> Typing ([Local Type], TExpr)
 inferWithSccLocals [] e ls' = do
   e' <- inferExpr e
   return (reverse ls', e')
-inferWithSccLocals ((NECyclicSCC xs):ls) e ls' = throwError $ InvalidRecursion $ NE.map lName xs
+inferWithSccLocals ((NECyclicSCC xs):_) _ _ = throwError $ InvalidRecursion $ NE.map lName xs
 inferWithSccLocals ((AcyclicSCC l):ls) e ls' = do
   (vof, t') <- case lBody l of
       Val e0 -> do
@@ -210,6 +196,7 @@ inferExpr (ECase _ e cs) = do
             unify (typeOf e0) rt)
     cs'
   return $ ECase rt e' cs'
+inferExpr (ETup _ _) = error "Tuples are not supported yet"
 
 inferCase :: UCase -> Typing TCase
 inferCase (Case p vs e) = do

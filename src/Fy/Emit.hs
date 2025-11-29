@@ -2,16 +2,15 @@ module Fy.Emit
   ( emitProgram
   ) where
 
+
 import Fy.Types
 import Fy.Ir
-import Fy.Typing
 
 import Prelude hiding (lookup, lines)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe, maybeToList)
-import Control.Monad (when, foldM, unless)
+import Data.List (intersperse)
+import Control.Monad (when)
 import Control.Monad.RWS
 
 type Identation = Int
@@ -179,7 +178,7 @@ emitEnum t isVariant vs = do
     when isVariant $ emit "__variant"
     line ";\n"
 emitStruct :: Ident -> IRRecord -> Emitter ()
-emitStruct n (IRRecord c fs) = do
+emitStruct n (IRRecord _ fs) = do
   indent
   emit "struct "
   braceBlock $ do

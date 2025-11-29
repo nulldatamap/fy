@@ -1,35 +1,17 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Fy.Naming
   ( namingCheck
   ) where
 
+
 import Fy.Types
 import Fy.Ast
 
-import Debug.Trace (trace, traceStack)
-import GHC.Stack (HasCallStack, prettyCallStack, callStack)
-
 import Prelude hiding (lookup, lines)
-import GHC.Generics (Generic)
-import System.Exit
-import System.Environment
-import System.Process hiding (env)
-import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Data.Set as S
-import Data.Hashable (Hashable)
 import Data.Set (Set)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe, maybeToList)
-import Data.Char
-import Control.Monad (when, foldM, unless)
+import Control.Monad (when, foldM)
 import Control.Monad.State
 import Control.Monad.Except
-import Control.Monad.RWS
-import Data.Graph (stronglyConnComp, SCC(..))
 import qualified Data.HashMap.Strict as M
 
 data NameKind = NKLocal Int
@@ -59,8 +41,6 @@ data NamingError = UndefinedName Ident
 
 type Naming = StateT NamingSt (Except NamingError)
 
-
-
 instance Context Naming Ident NameEntry NamingError where
   getContext = nstScope <$> get
   modifyContext f = modify (\s -> s { nstScope = f $ nstScope s })
@@ -87,7 +67,11 @@ addDeps x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
 runNaming :: NameMap -> Naming a -> Either NamingError a
 runNaming gs n = runExcept (evalStateT n st)
   where
-    st = NamingSt { nstNext = 0, nstScope = gs, nstDepth = 0 }
+    st = NamingSt { nstNext = 0
+                  , nstScope = gs
+                  , nstDepth = 0
+                  , nstDeps = S.empty
+                  , nstTypes = M.empty }
 
 withVars :: [(Ident, Ident)] -> Naming a -> Naming a
 withVars xs m = do
@@ -110,14 +94,16 @@ checkLocals ls e = do
     e' <- checkExpr e
     return (ls', e')
   return $ ELet () ls' e'
+
+checkLocal :: Local () -> Naming (Local ())
 checkLocal (Local t x _ (Val e)) = do
   (NameEntry x' _) <- lookup x
   (e', deps) <- block $ checkExpr e
   return $ Local t x' deps (Val e')
 checkLocal (Local t x _ (Fun f)) = do
    (NameEntry x' _) <- lookup x
-   f <- checkFunction x' (map fst $ fArgs f) (fBody f)
-   return $ Local t x' (S.empty) (Fun f)
+   f' <- checkFunction x' (map fst $ fArgs f) (fBody f)
+   return $ Local t x' (S.empty) (Fun f')
 
 checkPat :: UPat -> Naming (UPat, [(Ident, Ident)])
 checkPat p = do
@@ -132,7 +118,7 @@ checkPat' (PBinding () x) seen = do
       when (x `S.member` seen) $ throwError $ DuplicateNames [x]
       x' <- uniqId x
       return $ (PBinding () x', S.insert x seen, [(x, x')])
-checkPat' p@(PCons () x ps) seen = do
+checkPat' p0@(PCons () x ps) seen = do
    mK <- tryLookup x
    case mK of
      Just (NameEntry _ NKCons) -> do
@@ -150,7 +136,7 @@ checkPat' p@(PCons () x ps) seen = do
          when (x `S.member` seen) $ throwError $ DuplicateNames [x]
          x' <- uniqId x
          return $ (PBinding () x', S.insert x seen, [(x, x')])
-       else throwError $ InvalidPattern p
+       else throwError $ InvalidPattern p0
 checkPat' p seen = return (p, seen, [])
 
 checkCase :: UCase -> Naming UCase
@@ -172,16 +158,16 @@ checkExpr e =
         NKGlobal  -> return $ EGlobal () (neName ne)
         NKCons    -> return $ ECons () (neName ne)
     EApp () f xs -> (EApp ()) <$> (checkExpr f) <*> (mapM checkExpr xs)
-    ELet () bs e -> checkLocals bs e
+    ELet () bs e0 -> checkLocals bs e0
     EIf () e0 e1 e2 -> do
        e0' <- checkExpr e0
        e1' <- checkExpr e1
        e2' <- checkExpr e2
        return $ EIf () e0' e1' e2'
-    ECase () e cs -> do
-      e' <- checkExpr e
+    ECase () e0 cs -> do
+      e0' <- checkExpr e0
       cs' <- mapM checkCase cs
-      return $ ECase () e' cs'
+      return $ ECase () e0' cs'
     _ -> return e
 
 checkFunction :: Ident -> [Ident] -> UExpr -> Naming UFunction
@@ -206,7 +192,7 @@ checkType (TFun ts t) = (checkType t) >> (mapM_ checkType ts)
 
 checkTypeDef :: TypeDef -> Naming ()
 checkTypeDef (TypeDef _ (TBCType _)) = return ()
-checkTypeDef (TypeDef x (TBConses cs)) = do
+checkTypeDef (TypeDef _ (TBConses cs)) = do
   mapM_ checkAndIntroCons cs
   where
     checkAndIntroCons (TypeCons c ts) = do

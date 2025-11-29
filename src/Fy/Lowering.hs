@@ -2,35 +2,20 @@ module Fy.Lowering
   ( lowerToIR
   ) where
 
+
 import Fy.Types
 import Fy.Ast
 import Fy.Ir
 import Fy.Typing
 
-import Debug.Trace (trace, traceStack)
-import GHC.Stack (HasCallStack, prettyCallStack, callStack)
-
 import Prelude hiding (lookup, lines)
-import GHC.Generics (Generic)
-import System.Exit
-import System.Environment
-import System.Process hiding (env)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
-import qualified Data.Set as S
-import Data.Hashable (Hashable)
-import Data.Set (Set)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition, find)
-import Data.Maybe (fromMaybe, maybeToList)
-import Data.Char
-import Control.Monad (when, foldM, unless)
+import Data.List (find)
+import Data.Maybe
+import Control.Monad
 import Control.Monad.State
-import Control.Monad.Except
 import Control.Monad.RWS
-import Data.Graph (stronglyConnComp, SCC(..))
 import qualified Data.HashMap.Strict as M
 
 data LoweringSt = LoweringSt { lstNext  :: Int
@@ -55,8 +40,7 @@ runLowering m = fst $ evalRWS m () $
 
 newVar' :: (Maybe Text) -> Lowering Ident
 newVar' t = do
-  s <- get
-  let x = lstNext s
+  x <- lstNext <$> get
   modify (\s -> s { lstNext = x + 1 } )
   return $ Ident (fromMaybe "__" t) Nothing (Just x)
 
@@ -73,7 +57,7 @@ lowerLocal :: Local Type -> Lowering ()
 lowerLocal l@(Local t x _ (Val e)) = do
   e' <- lowerExpr e
   case t of
-    MonoType t -> irDef t x (Just e')
+    MonoType t0 -> irDef t0 x (Just e')
     _ -> error $ "Can't lower a polytype local: " ++ (show l)
 lowerLocal (Local _ x _ (Fun f)) =
   modify (\s -> s { lstKnownFuncs = M.insert x f (lstKnownFuncs s) } )
@@ -97,31 +81,31 @@ lowerExpr e =
   else do
     case e of
       ELit _ l -> return $ IRLit $ lowerLit l
-      EBuiltin t b -> error $ "Bare operatior: " ++ (show e)
+      EBuiltin _ _ -> error $ "Bare operatior: " ++ (show e)
       ECons t x -> return $ IRCons (typeName t) x []
-      ELocal t x -> return $ IRVar x
-      EGlobal t x -> return $ IRVar x
+      ELocal _ x -> return $ IRVar x
+      EGlobal _ x -> return $ IRVar x
       EIdent _ _ -> error $ "EIdent found during lowering: " ++ (show e)
       EApp t (ECons _ x) xs -> do
         xs' <- mapM lowerExpr xs
         return $ IRCons (typeName t) x xs'
-      EApp t (EBuiltin bt b) xs -> do
+      EApp _ (EBuiltin _ b) xs -> do
         xs' <- filterVoids <$> mapM lowerExpr xs
         let o = case b of
                   BAdd -> OpAdd
                   BEq  -> OpEq
         return $ IROp o xs'
-      EApp t f xs -> do
+      EApp _ f xs -> do
         f' <- lowerExpr f
         xs' <- filterVoids <$> mapM lowerExpr xs
         case f' of
           IRVar fx -> do
             fx' <- instanciateFunc fx (typeOf f)
             return $ IRCall fx' xs'
-          _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show $ EApp t f xs)
-      ELet t ls e -> do
+          _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show e)
+      ELet _ ls e0 -> do
         mapM_ lowerLocal ls
-        lowerExpr e
+        lowerExpr e0
       EIf t e0 e1 e2 -> do
         r <- newVar' (Just "_phi")
         irDef t r Nothing
@@ -134,68 +118,71 @@ lowerExpr e =
           tell [ IRSet r e2' ]
         tell [ IRIf e0' sts1 sts2 ]
         return $ IRVar r
-      ECase t e cs -> do
-        e' <- lowerExpr e
-        x <- case e' of
-             IRVar x -> return x
-             _ -> do
-               x <- newVar' (Just "_matchee")
-               tell [ IRDef (typeOf e) x $ Just e' ]
-               return $ x
+      ECase t e0 cs -> do
+        e0' <- lowerExpr e0
+        x <- case e0' of
+               IRVar x -> return x
+               _ -> do
+                 x <- newVar' (Just "_matchee")
+                 tell [ IRDef (typeOf e0) x $ Just e0' ]
+                 return $ x
         lowerCases x t cs
+      ETup _ _ -> error "Tuples are not supported yet"
 
 lookupTypeDef :: Type -> Lowering IRTypeDef
 lookupTypeDef t@(TVar _) = error $ "Type variable during lowering: " ++ (show t)
 lookupTypeDef t@(TFun _ _) = error $ "Tried to lookup a function type: " ++ (show t)
-lookupTypeDef t@(TCons c []) = do
+lookupTypeDef t@(TCons _ []) = do
   tds <- lstTypeInsts <$> get
   case M.lookup t tds of
     Nothing -> error $ "Couldn't resolve type: " ++ (show t)
     Just td -> return td
 lookupTypeDef t = error $ "Parametric types are not yet supported: " ++ (show t)
 
+lowerPattern :: TPat -> IRExpr -> [IRStmt] -> Lowering ([IRExpr], [IRStmt])
+lowerPattern (PHole _) _ bs = return ([], bs)
+lowerPattern (PLit _ l) path bs = return ([IROp OpEq [path, IRLit $ lowerLit l]], bs)
+lowerPattern (PBinding t x) path bs = return ([], bs ++ [IRDef t x $ Just path])
+lowerPattern (PCons t c ps) path bs = do
+  td <- lookupTypeDef t
+  case td of
+    IRCType _ _ -> error $ "Tried to match a ctype with a constructor? " ++ (show c) ++ " : " ++ (show t)
+    IREnumType tn _ -> return ([IROp OpEq [path, IRCons tn c []]], bs)
+    IRStructType _ (IRRecord _ fs) -> lowerRecordPattern ps bs path fs
+    IRTaggedType tn rs -> do
+      case find (\(IRRecord c0 _) -> c == c0) rs of
+        Nothing -> error $ "Couldn't find constructor `" ++ (show c) ++ "` in type: " ++ (show t)
+        Just (IRRecord _ fs) -> do
+          (cs, bs') <- lowerRecordPattern ps bs (IRField path c) fs
+          return ((IRCheckVariant path tn c):cs, bs')
+
+lowerRecordPattern :: [TPat] -> [IRStmt] -> IRExpr -> [(Type, Ident)]
+                   -> Lowering ([IRExpr], [IRStmt])
+lowerRecordPattern ps bs0 path fs =
+    foldM (\(cs, bs) ((_, f), p) -> do
+            (cs', bs') <- lowerPattern p (IRField path f) bs
+            return (cs ++ cs', bs'))
+    ([], bs0)
+    (zip fs ps)
+
 lowerCases :: Ident -> IRType -> [TCase] -> Lowering IRExpr
-lowerCases x t cs = do
+lowerCases matchVar rTy cases = do
   r <- newVar' (Just "_phi")
-  irDef t r Nothing
-  makeIfElseChain =<< mapM (lowerCase r) cs
+  irDef rTy r Nothing
+  makeIfElseChain =<< mapM (lowerCase r) cases
   return $ IRVar r
   where
-    lowerCase r (Case p vs e) = do
-      (eCs, bs) <- lowerPattern p (IRVar x) []
+    lowerCase r (Case p _ e) = do
+      (eCs, bs) <- lowerPattern p (IRVar matchVar) []
       (_, sts) <- stmts $ do
          e' <- lowerExpr e
          tell [ IRSet r e' ]
       return (eCs, bs ++ sts)
-    lowerPattern :: TPat -> IRExpr -> [IRStmt] -> Lowering ([IRExpr], [IRStmt])
-    lowerPattern (PHole _) path bs = return ([], bs)
-    lowerPattern (PLit _ l) path bs = return ([IROp OpEq [path, IRLit $ lowerLit l]], bs)
-    lowerPattern (PBinding t x) path bs = return ([], bs ++ [IRDef t x $ Just path])
-    lowerPattern (PCons t c ps) path bs = do
-      td <- lookupTypeDef t
-      case td of
-        IRCType _ _ -> error $ "Tried to match a ctype with a constructor? " ++ (show c) ++ " : " ++ (show t)
-        IREnumType t _ -> return ([IROp OpEq [path, IRCons t c []]], bs)
-        IRStructType _ (IRRecord _ fs) -> lowerRecordPattern ps bs path fs
-        IRTaggedType t rs -> do
-          case find (\(IRRecord c0 _) -> c == c0) rs of
-            Nothing -> error $ "Couldn't find constructor `" ++ (show c) ++ "` in type: " ++ (show t)
-            Just (IRRecord _ fs) -> do
-              (cs, bs') <- lowerRecordPattern ps bs (IRField path c) fs
-              return ((IRCheckVariant path t c):cs, bs')
-      where
-        lowerRecordPattern ps bs path fs =
-          foldM (\(cs, bs) ((_, f), p) -> do
-                    (cs', bs') <- lowerPattern p (IRField path f) bs
-                    return (cs ++ cs', bs'))
-            ([], bs)
-            (zip fs ps)
     makeIfElseChain [([], body)] = tell body
     makeIfElseChain [] = tell [ IRPanic "Uncovered match case" ]
     makeIfElseChain ((eCs, body):xs) = do
       (_, sts2) <- stmts $ makeIfElseChain xs
       tell [ IRIf (IROp OpAnd eCs) body sts2 ]
-
 
 lowerBody :: TExpr -> Lowering ()
 lowerBody b = do
@@ -204,10 +191,8 @@ lowerBody b = do
 
 instanciateFunc :: Ident -> Type -> Lowering Ident
 instanciateFunc fx ft = do
-  let (tArgs, tRet) = case unFn ft of
-                        Nothing -> error $ "Non-function type as function head: " ++ (show fx) ++ " : " ++ (show ft)
-                        Just r -> r
-
+  when (isNothing $ unFn ft) $ do
+    error $ "Non-function type as function head: " ++ (show fx) ++ " : " ++ (show ft)
   st <- get
   case M.lookup (fx, ft) (lstFuncInsts st) of
     Just f -> return $ irfName f
@@ -221,7 +206,7 @@ instanciateFunc fx ft = do
                 let fx' = irfName f'
                 modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
                 return fx'
-              PolyType txs rft -> do
+              PolyType _ rft -> do
                 let mF' = runTyping $ do
                             unify rft ft
                             realize $ f { fType = MonoType ft }
@@ -231,12 +216,12 @@ instanciateFunc fx ft = do
                     ++ ": " ++ (show err)
                   Right f' -> do
                     fx' <- refreshName $ fName f'
-                    f' <- lowerFunction $ f' { fName = fx' }
-                    modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
+                    f'' <- lowerFunction $ f' { fName = fx' }
+                    modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f'' (lstFuncInsts s) })
                     return fx'
   where
-    refreshName (Ident x ns i) = do
-      let x' = case i of
+    refreshName (Ident x ns mI) = do
+      let x' = case mI of
                 Nothing -> x
                 Just i -> T.concat [ x, "_", (T.pack $ show i), "_inst__" ]
       (Ident _ _ i') <- newVar
@@ -244,11 +229,11 @@ instanciateFunc fx ft = do
 
 lowerFunction :: TFunction -> Lowering IRFunc
 lowerFunction f = do
-  let (argTs, retT) = case fType f of
-                        MonoType fty -> case unFn fty of
-                                          Nothing -> error "Type of function isn't a arrow type!"
-                                          Just x -> x
-                        PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
+  let (_, retT) = case fType f of
+                    MonoType fty -> case unFn fty of
+                                      Nothing -> error "Type of function isn't a arrow type!"
+                                      Just x -> x
+                    PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
   (_, body) <- stmts $ lowerBody $ fBody f
   let f' = IRFunc { irfName  = fName f
                   , irfRetTy = retT
@@ -280,7 +265,7 @@ lowerType' (TypeDef n (TBConses cs)) = do
 lowerProgram :: [TypeDef] -> TFunction -> Lowering IRProgram
 lowerProgram types f = do
   types' <- mapM lowerType types
-  lowerFunction f
+  _ <- lowerFunction f
   fs <- lstFuncs <$> get
   return $ IRProgram { irpTypes = types', irpFuncs = reverse fs }
 

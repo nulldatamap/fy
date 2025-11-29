@@ -1,9 +1,10 @@
 module Fy.Ir
   ( Operator(..)
-  , IRType(..), IRTypeDef(..), IRRecord(..)
+  , IRType, IRTypeDef(..), IRRecord(..)
   , IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
   , IRProgram(..)
   ) where
+
 
 import Data.Text (Text)
 

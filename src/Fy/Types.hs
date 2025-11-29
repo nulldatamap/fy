@@ -1,41 +1,24 @@
 module Fy.Types
-     ( FreeVars(..), Substitutable(..), Typed(..), Env(..), Subst(..)
-     , TyVar(..), Ident(..), Type(..), TypeSchemeT(..), TypeScheme(..)
+     ( FreeVars(..), Substitutable(..), Typed(..), Env, Subst(..)
+     , TyVar, Ident(..), Type(..), TypeSchemeT(..), TypeScheme
      , Context(..)
      , mkId, suffixId, canonicalId, enumeratedIds
      , unnamedFields, variantField, variant, typeName
      , unFn, isFnTy, tUnit, tInt, tBool
      ) where
 
-import Debug.Trace (trace, traceStack)
-import GHC.Stack (HasCallStack, prettyCallStack, callStack)
 
 import Prelude hiding (lookup, lines)
 import GHC.Generics (Generic)
-import System.Exit
-import System.Environment
-import System.Process hiding (env)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
-import qualified Data.Set as S
 import Data.Hashable (Hashable)
 import Data.Set (Set)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe, maybeToList)
-import Data.Char
-import Control.Monad (when, foldM, unless)
-import Control.Monad.State
+import qualified Data.Set as S
+import Data.List (intercalate)
+import Data.Maybe (fromMaybe)
 import Control.Monad.Except
-import Control.Monad.RWS
-import Data.Graph (stronglyConnComp, SCC(..))
 import qualified Data.HashMap.Strict as M
-
-import Text.Megaparsec hiding (State)
-import Text.Megaparsec.Char
-import qualified Text.Megaparsec.Char.Lexer as L
 
 data Ident = Ident { idName :: Text
                    , idNamespace :: (Maybe Text)
@@ -63,7 +46,6 @@ data Subst = Subst (M.HashMap Int Type)
   deriving (Show)
 
 type Env = M.HashMap Ident TypeScheme
-
 
 class Functor a => Typed a where
   withType :: (Type -> a Type -> x) -> a Type -> x
@@ -110,6 +92,28 @@ class (Hashable k, Monad m, MonadError e m) => Context m k v e
     modifyContext (const oldCtx)
     return r
 
+instance FreeVars Type where
+    freeVars (TVar x) = S.singleton x
+    freeVars (TCons _ ts) = foldMap freeVars ts
+    freeVars (TFun ts t) = (foldMap freeVars ts) `S.union` (freeVars t)
+
+instance FreeVars TypeScheme where
+  freeVars (MonoType t) = freeVars t
+  freeVars (PolyType ts t) = (freeVars t) S.\\ (S.fromList $ ts)
+
+instance FreeVars Env where
+  freeVars env = M.foldl' (\vs x -> vs `S.union` (freeVars x)) S.empty env
+
+instance Substitutable Type where
+    subst (Subst m) (TVar x) = fromMaybe (TVar x) $ M.lookup x m
+    subst s (TCons k ts) = TCons k $ map (subst s) ts
+    subst s (TFun ts t)  = TFun (map (subst s) ts) (subst s t)
+
+instance Substitutable TypeScheme where
+  subst s (MonoType t) = MonoType $ subst s t
+  -- ASSUMPTION: All the type variables are fresh and shouldn't exist in s
+  subst s (PolyType ts t) = PolyType ts $ subst s t
+
 instance Show Type where
   show (TVar x) = "'t" ++ show x
   show (TCons x []) = show x
@@ -126,10 +130,10 @@ mkId x = Ident x Nothing Nothing
 suffixId :: Ident -> Text -> Ident
 suffixId (Ident x ns i) s = Ident (T.append x s) ns i
 canonicalId :: Ident -> Text
-canonicalId (Ident n ns id) = T.concat $ prefix ++ (n : suffix)
+canonicalId (Ident n mNs mI) = T.concat $ prefix ++ (n : suffix)
   where
-    prefix = fromMaybe [] $ fmap (\ns -> ["__", ns, "_"]) ns
-    suffix = fromMaybe [] $ fmap (\id -> ["_", T.pack $ show id]) id
+    prefix = fromMaybe [] $ fmap (\ns -> ["__", ns, "_"]) mNs
+    suffix = fromMaybe [] $ fmap (\i -> ["_", T.pack $ show i]) mI
 
 enumeratedIds :: Text -> [Ident]
 enumeratedIds s = map (\i -> Ident s Nothing (Just i)) [0..]

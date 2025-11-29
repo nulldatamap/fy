@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Fy.Ast
   ( TypeCons(..), TypeDef(..), TypeBody(..)
   , Program(..), Builtin(..), ValOrFun(..)
@@ -6,33 +5,15 @@ module Fy.Ast
   , Case(..), Expr(..), Pat(..)
   , UProgram, UPat, UCase, UExpr, UFunction
   , TProgram, TPat, TCase, TExpr, TFunction
+  , isFun
   ) where
+
 
 import Fy.Types
 
 import Prelude hiding (lookup, lines)
-import GHC.Generics (Generic)
-import System.Exit
-import System.Environment
-import System.Process hiding (env)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
-import qualified Data.Set as S
-import Data.Hashable (Hashable)
 import Data.Set (Set)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe, maybeToList)
-import Data.Char
-import Control.Monad (when, foldM, unless)
-import Control.Monad.State
-import Control.Monad.Except
-import Control.Monad.RWS
-import Data.Graph (stronglyConnComp, SCC(..))
-import qualified Data.HashMap.Strict as M
-
 
 data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
   deriving (Show)
@@ -119,37 +100,13 @@ instance Typed Expr where
   withType f x@(ELet t _ _) = f t x
   withType f x@(EIf t _ _ _) = f t x
   withType f x@(ECase t _ _) = f t x
+  withType f x@(ETup t _) = f t x
 
 instance Typed Pat where
   withType f x@(PHole t) = f t x
   withType f x@(PLit t _) = f t x
   withType f x@(PBinding t _) = f t x
   withType f x@(PCons t _ _) = f t x
-
-instance FreeVars Type where
-    freeVars (TVar x) = S.singleton x
-    freeVars (TCons _ ts) = foldMap freeVars ts
-    freeVars (TFun ts t) = (foldMap freeVars ts) `S.union` (freeVars t)
-
-instance FreeVars TypeScheme where
-  freeVars (MonoType t) = freeVars t
-  freeVars (PolyType ts t) = (freeVars t) S.\\ (S.fromList $ ts)
-
-instance FreeVars Env where
-  freeVars env = M.foldl' (\vs x -> vs `S.union` (freeVars x)) S.empty env
-
-instance Substitutable Type where
-    subst (Subst m) (TVar x) = fromMaybe (TVar x) $ M.lookup x m
-    subst s (TCons k ts) = TCons k $ map (subst s) ts
-    subst s (TFun ts t)  = TFun (map (subst s) ts) (subst s t)
-
-instance Substitutable (Expr Type) where
-  subst s x = fmap (subst s) x
-
-instance Substitutable TypeScheme where
-  subst s (MonoType t) = MonoType $ subst s t
-  -- ASSUMPTION: All the type variables are fresh and shouldn't exist in s
-  subst s (PolyType ts t) = PolyType ts $ subst s t
 
 instance Substitutable (ValOrFun Type) where
   subst s (Val v) = Val $ subst s v
@@ -163,6 +120,9 @@ instance Substitutable TFunction  where
   subst s f = f { fBody = subst s $ fBody f
                 , fType = subst s $ fType f
                 , fArgs = map (\(x, t) -> (x, subst s t)) $ fArgs f }
+
+instance Substitutable (Expr Type) where
+  subst s x = fmap (subst s) x
 
 isFun :: ValOrFun t -> Bool
 isFun (Fun _) = True

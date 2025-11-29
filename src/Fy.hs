@@ -3,42 +3,17 @@ module Fy
     ( compileAndRun
     ) where
 
-import Debug.Trace (trace, traceStack)
-import GHC.Stack (HasCallStack, prettyCallStack, callStack)
 
 import Prelude hiding (lookup, lines)
-import GHC.Generics (Generic)
-import Data.Text (Text)
-import qualified Data.Text as T
-import System.Exit
-import System.Environment
 import qualified Data.Text.IO as TIO
-import System.Process hiding (env)
-import qualified Data.Set as S
-import Data.Hashable (Hashable)
-import Data.Set (Set)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe, maybeToList)
-import Data.Char
-import Control.Monad (when, foldM, unless)
-import Control.Monad.State
-import Control.Monad.Except
-import Control.Monad.RWS
-import Data.Graph (stronglyConnComp, SCC(..))
-import qualified Data.HashMap.Strict as M
+import System.Exit
+import System.Process
+import Text.Megaparsec
 
-import Text.Megaparsec hiding (State)
-import Text.Megaparsec.Char
-import qualified Text.Megaparsec.Char.Lexer as L
-
-import Fy.Types
 import Fy.Ast
 import Fy.Parser
 import Fy.Naming
 import Fy.Typing
-import Fy.Ir
 import Fy.Lowering
 import Fy.Emit
 

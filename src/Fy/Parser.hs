@@ -3,34 +3,16 @@ module Fy.Parser
   , parseProgram
   ) where
 
+
 import Fy.Types
 import Fy.Ast
 
-import Debug.Trace (trace, traceStack)
-import GHC.Stack (HasCallStack, prettyCallStack, callStack)
-
 import Prelude hiding (lookup, lines)
-import GHC.Generics (Generic)
-import System.Exit
-import System.Environment
-import System.Process hiding (env)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Data.Set as S
-import Data.Hashable (Hashable)
-import Data.Set (Set)
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import Data.List (intersperse, intercalate, partition)
-import Data.Maybe (fromMaybe, maybeToList)
 import Data.Char
-import Control.Monad (when, foldM, unless)
-import Control.Monad.State
-import Control.Monad.Except
-import Control.Monad.RWS
-import Data.Graph (stronglyConnComp, SCC(..))
-import qualified Data.HashMap.Strict as M
+import Data.Maybe (fromMaybe)
 
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
@@ -119,7 +101,7 @@ pExpr0 =  ((ELit ()) <$> pLit)
         case es of
             []  -> ELit () LUnit
             [e] -> e
-            es  -> error "Tuples are not supported yet"
+            _  -> error "Tuples are not supported yet"
 
 pExpr1 :: Parser UExpr
 pExpr1 = do
@@ -177,17 +159,17 @@ pType' = pParenOrUnit
       <|> (\x -> TCons x []) <$> pIdent
   where
     pParenOrUnit = do
-      t <- pParens (optional $ pType)
-      case t of
+      mT <- pParens (optional $ pType)
+      case mT of
         Nothing -> return tUnit
         Just t -> return t
 
 pType :: Parser Type
 pType = do
   args <- pTypeCons `sepBy1` (symbol ",")
-  ret <- optional $ (symbol "->") *> pTypeCons
-  case (args, ret) of
-    (args, Just ret) -> return $ TFun args ret
+  mRet <- optional $ (symbol "->") *> pTypeCons
+  case (args, mRet) of
+    (_, Just ret) -> return $ TFun args ret
     ([t], _) -> return t
     (_, _)   -> error "Tuples are not supported yet"
   where
@@ -195,8 +177,7 @@ pType = do
 
 pTypeDef :: Parser TypeDef
 pTypeDef = do
-  symbol ":"
-  x <- pIdent
+  x <- symbol ":" *> pIdent
   b <- optional $ symbol "=" >> pDefOrCType
   return $ TypeDef x $ fromMaybe (TBConses []) b
   where

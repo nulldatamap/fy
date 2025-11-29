@@ -25,13 +25,31 @@ source-repository head
 
 library
   exposed-modules:
-      Lib
+      Fy
+      Fy.Ast
+      Fy.Emit
+      Fy.Ir
+      Fy.Lowering
+      Fy.Naming
+      Fy.Parser
+      Fy.Types
+      Fy.Typing
   other-modules:
       Paths_fy
   autogen-modules:
       Paths_fy
   hs-source-dirs:
       src
+  default-extensions:
+      OverloadedStrings
+      FlexibleInstances
+      DeriveFunctor
+      DeriveFoldable
+      DeriveAnyClass
+      DeriveGeneric
+      StandaloneDeriving
+      FunctionalDependencies
+      MultiParamTypeClasses
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
@@ -54,6 +72,16 @@ executable fy-exe
       Paths_fy
   hs-source-dirs:
       app
+  default-extensions:
+      OverloadedStrings
+      FlexibleInstances
+      DeriveFunctor
+      DeriveFoldable
+      DeriveAnyClass
+      DeriveGeneric
+      StandaloneDeriving
+      FunctionalDependencies
+      MultiParamTypeClasses
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
@@ -78,6 +106,16 @@ test-suite fy-test
       Paths_fy
   hs-source-dirs:
       test
+  default-extensions:
+      OverloadedStrings
+      FlexibleInstances
+      DeriveFunctor
+      DeriveFoldable
+      DeriveAnyClass
+      DeriveGeneric
+      StandaloneDeriving
+      FunctionalDependencies
+      MultiParamTypeClasses
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5

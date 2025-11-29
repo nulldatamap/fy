@@ -42,6 +42,17 @@ ghc-options:
 - -Wpartial-fields
 - -Wredundant-constraints
 
+default-extensions:
+- OverloadedStrings
+- FlexibleInstances
+- DeriveFunctor
+- DeriveFoldable
+- DeriveAnyClass
+- DeriveGeneric
+- StandaloneDeriving
+- FunctionalDependencies
+- MultiParamTypeClasses
+
 library:
   source-dirs: src
 

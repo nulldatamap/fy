@@ -11,9 +11,9 @@
         | Foone
 
 if $$eq 1 1
-then id (Foo2 (High (double (wooz () ($$eq 1 2) xy 2)))
-           (Low None))
-     | (Foo2 (High x) z) -> x
+then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) xy 2)))
+           (Bar/Low Opt/None))
+     | (Foo/Foo2 (Bar/High x) z) -> x
 else -100
 . qq = ()
 . wow x y z = x
@@ -24,7 +24,7 @@ else -100
 . k x = ($$add (f x) 1 . f x = $$add 0 x)
 . id x = x
 . double x = $$add x x
-. xy = Pos 2 3
-. truth = True
+. xy = Pos/Pos 2 3
+. truth = MyBool/True
 
 -- Cool huh?

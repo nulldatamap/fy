@@ -59,7 +59,7 @@ data IRProgram = IRProgram { irpTypes :: [IRTypeDef], irpFuncs :: [IRFunc] }
             deriving (Show)
 
 irtUnit :: IRType
-irtUnit = IRType (Ident "()" Nothing Nothing)
+irtUnit = IRType (Ident "()" [] Nothing)
 
 typeDefName :: IRTypeDef -> Ident
 typeDefName (IREnumType n _) = n

@@ -12,6 +12,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Set as S
 import Data.Char
+import Data.List (unsnoc)
 import Data.Maybe (fromMaybe)
 
 import Text.Megaparsec hiding (State)
@@ -60,7 +61,11 @@ pIdent' = try $ do
   else return x
 
 pIdent :: Parser Ident
-pIdent = mkId <$> (lexeme pIdent')
+pIdent = lexeme $ do
+  xs <- pIdent' `sepBy1` (string "/")
+  case unsnoc xs of
+    Just (ns, x) -> return $ Ident x ns Nothing
+    _ -> error $ "Empty ident? " ++ (show xs)
 
 pInteger :: Parser Integer
 pInteger = lexeme $ L.signed (return ()) L.decimal

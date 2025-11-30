@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveFunctor, DeriveFoldable, DeriveAnyClass, DeriveGeneric, StandaloneDeriving, FunctionalDependencies, MultiParamTypeClasses #-}
 module Fy
     ( compileAndRun
     ) where
@@ -19,20 +18,24 @@ import Fy.Emit
 -- NEXT:
 -- - Fix parsing
 -- TODO:
--- - Duplicate name check
 -- - Type parameter usage (for types)
--- - Name spaces
 -- - Source locations
 -- - Error context
+-- - Name aliases
+-- - Module system
 -- - Guards?
 -- - Zero types
 -- - Tuples
+-- - @-patterns
 -- - Function pointer types
--- - Parametric types
 -- - Boxed types
 -- - Toplevel functions?
 -- - Lambdas
 -- - Closures
+-- - "Effects"
+-- - Effect handlers
+-- - Traits
+-- - Trait boxing
 -- - Pipe operators
 
 compileAndRun :: String -> IO ()

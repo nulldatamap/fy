@@ -81,7 +81,12 @@ withVars xs m = do
 
 scopedVars' :: [Ident] -> Naming a -> Naming ([Ident], a)
 scopedVars' xs m = do
-    xs' <- mapM uniqId xs
+    (_, xs') <- foldM (\(seen, xs') x -> do
+                          if x `S.member` seen
+                          then throwError $ DuplicateNames [x]
+                          else do
+                            x' <- uniqId x
+                            return (S.insert x seen, x':xs')) (S.empty, []) xs
     d <- nstDepth <$> get
     scoped (map (\(x, x') -> (x, NameEntry x' (NKLocal d))) $ zip xs xs') $ ((,) xs') <$> m
 
@@ -206,15 +211,23 @@ checkTypeDef (TypeDef tn tPrms (TBConses cs)) = do
            tPrms
     checkAndIntroCons (TypeCons c ts) = do
       ts' <- mapM (checkType ps) ts
-      modify (\s -> s { nstScope = M.insert c (NameEntry c NKCons) $ nstScope s })
-      return $ TypeCons c ts'
+      let qn = tn <> c
+      modify (\s -> s { nstScope = M.insert qn (NameEntry qn NKCons) $ nstScope s })
+      return $ TypeCons (tn <> c) ts'
 
 checkTypeDefs :: [TypeDef] -> Naming [TypeDef]
 checkTypeDefs tds = do
-  modify (\s -> s { nstTypes = M.fromList $ builtins ++ (map (\td -> (tdName td, Just $ tdBody td)) tds) } )
+  types <-
+      foldM (\m (TypeDef tn _ tb) ->
+               if tn `M.member` m
+               then throwError $ DuplicateNames [tn]
+               else return $ M.insert tn (Just tb) m)
+        builtins
+        tds
+  modify (\s -> s { nstTypes =  types} )
   mapM checkTypeDef tds
   where
-    builtins = map (\x -> (mkId x, Nothing)) ["int", "()"]
+    builtins = M.fromList $ map (\x -> (mkId x, Nothing)) ["int", "()"]
 
 checkProgram :: UProgram -> Naming ([TypeDef], UFunction)
 checkProgram (Program tds e) = do

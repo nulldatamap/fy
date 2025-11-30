@@ -3,7 +3,7 @@ module Fy.Types
      , TyVar, Ident(..), Type(..), TypeSchemeT(..), TypeScheme
      , Context(..)
      , mkId, suffixId, canonicalId, enumeratedIds
-     , unnamedFields, variantField, variant, typeName
+     , unnamedFields, variantField, typeName
      , unFn, isFnTy, tUnit, tInt, tBool
      ) where
 
@@ -21,7 +21,7 @@ import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
 
 data Ident = Ident { idName :: Text
-                   , idNamespace :: (Maybe Text)
+                   , idNamespace :: [Text]
                    , idSuffix :: (Maybe Int) }
   deriving (Ord, Eq, Generic)
 
@@ -60,8 +60,7 @@ class Substitutable a where
 
 instance Show Ident where
   show (Ident n ns sf) =
-    (fromMaybe "" $ fmap ((++"/") . T.unpack) ns)
-    ++ (T.unpack n)
+    (intercalate "/" $ map T.unpack $ ns ++ [n])
     ++ (fromMaybe "" $ fmap (('$':) . show) sf)
 
 class (Hashable k, Monad m, MonadError e m) => Context m k v e
@@ -124,8 +123,12 @@ instance Show a => Show (TypeSchemeT a)  where
   show (MonoType t) = show t
   show (PolyType ts t) = "forall " ++ (intercalate " " $ map (show . TVar) ts) ++ " . " ++ (show t)
 
+instance Semigroup Ident where
+  (<>) (Ident a aNs Nothing) (Ident b bNs bI) = Ident b (aNs ++ [a] ++ bNs) bI
+  (<>) a b = error $ "Can't combine the idents: `" ++ (show a) ++ "` and `" ++  (show b) ++ "`"
+
 mkId :: Text -> Ident
-mkId x = Ident x Nothing Nothing
+mkId x = Ident x [] Nothing
 
 suffixId :: Ident -> Text -> Ident
 suffixId (Ident x ns i) s = Ident (T.append x s) ns i
@@ -133,11 +136,11 @@ suffixId (Ident x ns i) s = Ident (T.append x s) ns i
 canonicalId :: Ident -> Text
 canonicalId (Ident n mNs mI) = T.concat $ prefix ++ (n : suffix)
   where
-    prefix = fromMaybe [] $ fmap (\ns -> ["__", ns, "_"]) mNs
+    prefix = concat $ fmap (\ns -> [ns, "_"]) mNs
     suffix = fromMaybe [] $ fmap (\i -> ["_", T.pack $ show i]) mI
 
 enumeratedIds :: Text -> [Ident]
-enumeratedIds s = map (\i -> Ident s Nothing (Just i)) [0..]
+enumeratedIds s = map (\i -> Ident s [] (Just i)) [0..]
 
 unnamedFields :: [Ident]
 unnamedFields = enumeratedIds ""
@@ -145,11 +148,8 @@ unnamedFields = enumeratedIds ""
 variantField :: Ident
 variantField = mkId "__variant"
 
-variant :: Ident -> Ident -> Ident
-variant t x = Ident (canonicalId x) (Just $ canonicalId t) Nothing
-
 typeName :: Type -> Ident
-typeName (TVar i) = Ident "'t" Nothing (Just i)
+typeName (TVar i) = Ident "'t" [] (Just i)
 typeName (TCons c _) = c
 typeName (TFun xs _) = mkId $ T.pack $ replicate (length xs) ',' ++ "->"
 

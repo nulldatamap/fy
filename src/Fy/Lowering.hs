@@ -42,7 +42,7 @@ newVar' :: (Maybe Text) -> Lowering Ident
 newVar' t = do
   x <- lstNext <$> get
   modify (\s -> s { lstNext = x + 1 } )
-  return $ Ident (fromMaybe "__" t) Nothing (Just x)
+  return $ Ident (fromMaybe "__" t) [] (Just x)
 
 encodeType :: TypeScheme -> Text
 encodeType t =
@@ -56,9 +56,9 @@ encodeType t =
       case elemIndex v vs of
         Nothing -> error $ "Tried to encode a type with a free variable"
         Just i -> [ "V", T.show i ]
-    encodeType' _ (TCons (Ident "int" Nothing Nothing) []) = ["i"]
-    encodeType' _ (TCons (Ident "bool" Nothing Nothing) []) = ["b"]
-    encodeType' _ (TCons (Ident "()" Nothing Nothing) []) = ["_"]
+    encodeType' _ (TCons (Ident "int" [] Nothing) []) = ["i"]
+    encodeType' _ (TCons (Ident "bool" [] Nothing) []) = ["b"]
+    encodeType' _ (TCons (Ident "()" [] Nothing) []) = ["_"]
     encodeType' vs (TCons c cs) =
       let cs' = concatMap (encodeType' vs) cs
           n0 = canonicalId c
@@ -180,9 +180,9 @@ lookupTypeDef t@(TCons c ts) = do
     Just td -> return td
 
 lowerType :: Type -> Lowering IRType
-lowerType (TCons x@(Ident "int" Nothing Nothing) []) = return $ IRType x
-lowerType (TCons x@(Ident "bool" Nothing Nothing) []) = return $ IRType x
-lowerType (TCons x@(Ident "()" Nothing Nothing) []) = return $ IRType x
+lowerType (TCons x@(Ident "int" [] Nothing) []) = return $ IRType x
+lowerType (TCons x@(Ident "bool" [] Nothing) []) = return $ IRType x
+lowerType (TCons x@(Ident "()" [] Nothing) []) = return $ IRType x
 lowerType t = do
   td <- lookupTypeDef t
   return $ IRType $ typeDefName td

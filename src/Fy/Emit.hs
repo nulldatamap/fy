@@ -149,10 +149,8 @@ emitExpr (IROp o [x, y]) =
         OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
         OpEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
-emitExpr (IRCons (IRType tn) x es) = do
+emitExpr (IRCons _ x es) = do
   emit "MK_"
-  emitIdent tn
-  emit "_"
   emitIdent x
   parens $ seperated ", " emitExpr es
 emitExpr (IRCall x es) = do
@@ -166,19 +164,19 @@ emitExpr (IRField e f) = do
   mParen $ emitExpr e
   emit "."
   emitIdent f
-emitExpr (IRCheckVariant e t v) = do
+emitExpr (IRCheckVariant e _ v) = do
   parens $ do
     emitExpr (IRField e variantField)
     emit " == "
-    emitIdent $ variant t v
+    emitIdent $ v
 
 emitIdent :: Ident -> Emitter ()
 emitIdent x = emit $ canonicalId x
 
 emitType :: IRType -> Emitter ()
-emitType (IRType (Ident "int" Nothing Nothing)) = emit "int"
-emitType (IRType (Ident "bool" Nothing Nothing)) = emit "bool"
-emitType (IRType (Ident "()" Nothing Nothing)) = emit "void"
+emitType (IRType (Ident "int" [] Nothing)) = emit "int"
+emitType (IRType (Ident "bool" [] Nothing)) = emit "bool"
+emitType (IRType (Ident "()" [] Nothing)) = emit "void"
 emitType (IRType x) = emitIdent x
 -- emitType t = error $ "Unsupported type: " ++ (show t)
 
@@ -187,7 +185,7 @@ emitEnum t isVariant vs = do
     indent
     emit "typedef enum "
     braceBlock $ do
-      mapM_ (\n -> indent >> (emitIdent $ variant t n) >> line ",") vs
+      mapM_ (\n -> indent >> (emitIdent $ n) >> line ",") vs
     emit " "
     emitIdent t
     when isVariant $ emit "__variant"
@@ -241,20 +239,16 @@ emitTypeDef (IRTaggedType t rs) = do
 
 emitConses :: IRTypeDef -> Emitter ()
 emitConses (IRCType _ _) = return ()
-emitConses (IREnumType t variants) = do
+emitConses (IREnumType _ variants) = do
   mapM_ (\v -> do
             emit "#define MK_"
-            emitIdent t
-            emit "_"
             emitIdent v
             emit "() "
-            emitIdent $ variant t v
+            emitIdent $ v
             line "") variants
   line ""
 emitConses (IRStructType t (IRRecord c fs)) = do
   emit "#define MK_"
-  emitIdent t
-  emit "_"
   emitIdent c
   let args = take (length fs) $ enumeratedIds "__arg"
   parens $ seperated ", " emitIdent args
@@ -267,8 +261,6 @@ emitConses (IRTaggedType t rs) = mapM_ emitCons rs >> line ""
   where
     emitCons (IRRecord c fs) = do
       emit "#define MK_"
-      emitIdent t
-      emit "_"
       emitIdent c
       let args = take (length fs) $ enumeratedIds "__arg"
       parens $ seperated ", " emitIdent args
@@ -277,7 +269,7 @@ emitConses (IRTaggedType t rs) = mapM_ emitCons rs >> line ""
       emit " {."
       emitIdent variantField
       emit " = "
-      emitIdent $ variant t c
+      emitIdent $ c
       emit ", ."
       emitIdent c
       emit " = {"

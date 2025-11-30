@@ -125,7 +125,6 @@ introTypeCons ps t (TypeCons c ts) =
                     ct
   in modify (\s -> s { env = M.insert c ct' $ env s })
 
-
 inferFunction :: UFunction -> Typing TFunction
 inferFunction f = do
   prmTys <- mapM (const fresh) $ fArgs f

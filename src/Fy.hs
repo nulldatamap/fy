@@ -10,7 +10,6 @@ import System.Exit
 import System.Process
 import Text.Megaparsec
 
-import Fy.Ast
 import Fy.Parser
 import Fy.Naming
 import Fy.Typing
@@ -21,6 +20,10 @@ import Fy.Emit
 -- - Fix parsing
 -- TODO:
 -- - Duplicate name check
+-- - Type parameter usage (for types)
+-- - Name spaces
+-- - Source locations
+-- - Error context
 -- - Guards?
 -- - Zero types
 -- - Tuples
@@ -43,8 +46,7 @@ compileAndRun f = do
       let p = ast'
       case namingCheck p of
         Left err -> putStrLn $ show err
-        Right fn -> do
-            let types = pTypeDefs p
+        Right (types, fn) -> do
             case infer types fn of
                 Left err -> putStrLn $ show err
                 Right ast -> do

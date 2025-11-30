@@ -11,7 +11,7 @@ import Fy.Typing
 import Prelude hiding (lookup, lines)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.List (find)
+import Data.List (intersperse, find, elemIndex)
 import Data.Maybe
 import Control.Monad
 import Control.Monad.State
@@ -44,20 +44,49 @@ newVar' t = do
   modify (\s -> s { lstNext = x + 1 } )
   return $ Ident (fromMaybe "__" t) Nothing (Just x)
 
-newVar :: Lowering Ident
-newVar = newVar' Nothing
+encodeType :: TypeScheme -> Text
+encodeType t =
+  T.concat $
+    case t of
+        (MonoType t0) -> encodeType' [] t0
+        (PolyType vs t0) -> ["S", T.show $ length vs] ++ encodeType' vs t0
+  where
+    encodeType' :: [TyVar] -> Type -> [Text]
+    encodeType' vs (TVar v) =
+      case elemIndex v vs of
+        Nothing -> error $ "Tried to encode a type with a free variable"
+        Just i -> [ "V", T.show i ]
+    encodeType' _ (TCons (Ident "int" Nothing Nothing) []) = ["i"]
+    encodeType' _ (TCons (Ident "bool" Nothing Nothing) []) = ["b"]
+    encodeType' _ (TCons (Ident "()" Nothing Nothing) []) = ["_"]
+    encodeType' vs (TCons c cs) =
+      let cs' = concatMap (encodeType' vs) cs
+          n0 = canonicalId c
+          n = [ "N", T.show $ T.length n0, canonicalId c ]
+      in if null cs
+         then n
+         else [ "I", T.show $ length cs ] ++ n ++ cs'
+    encodeType' vs (TFun ts t0) =
+      let ts' = concatMap (encodeType' vs) ts
+          t0' = encodeType' vs t0
+      in [ "F", T.show $ length ts ] ++ ts' ++ t0'
 
-irDef :: Type -> Ident -> (Maybe IRExpr) -> Lowering ()
-irDef t x v =
-  if t == tUnit
-  then return ()
-  else tell [ IRDef t x v ]
+irDef' :: IRType -> Ident -> (Maybe IRExpr) -> [IRStmt]
+irDef' t x v =
+  if t == irtUnit
+  then []
+  else [ IRDef t x v ]
+
+irDef :: IRType -> Ident -> (Maybe IRExpr) -> Lowering ()
+irDef t x v = tell $ irDef' t x v
 
 lowerLocal :: Local Type -> Lowering ()
 lowerLocal l@(Local t x _ (Val e)) = do
   e' <- lowerExpr e
   case t of
-    MonoType t0 -> irDef t0 x (Just e')
+    MonoType t0 -> do
+      t0' <- lowerType t0
+      irDef t0' x (Just e')
     _ -> error $ "Can't lower a polytype local: " ++ (show l)
 lowerLocal (Local _ x _ (Fun f)) =
   modify (\s -> s { lstKnownFuncs = M.insert x f (lstKnownFuncs s) } )
@@ -82,13 +111,16 @@ lowerExpr e =
     case e of
       ELit _ l -> return $ IRLit $ lowerLit l
       EBuiltin _ _ -> error $ "Bare operatior: " ++ (show e)
-      ECons t x -> return $ IRCons (typeName t) x []
+      ECons t x -> do
+        t' <- lowerType t
+        return $ IRCons t' x []
       ELocal _ x -> return $ IRVar x
       EGlobal _ x -> return $ IRVar x
       EIdent _ _ -> error $ "EIdent found during lowering: " ++ (show e)
       EApp t (ECons _ x) xs -> do
         xs' <- mapM lowerExpr xs
-        return $ IRCons (typeName t) x xs'
+        t' <- lowerType t
+        return $ IRCons t' x xs'
       EApp _ (EBuiltin _ b) xs -> do
         xs' <- filterVoids <$> mapM lowerExpr xs
         let o = case b of
@@ -108,7 +140,8 @@ lowerExpr e =
         lowerExpr e0
       EIf t e0 e1 e2 -> do
         r <- newVar' (Just "_phi")
-        irDef t r Nothing
+        t' <- lowerType t
+        irDef t' r Nothing
         e0' <- lowerExpr e0
         (_, sts1) <- stmts $ do
           e1' <- lowerExpr e1
@@ -124,7 +157,8 @@ lowerExpr e =
                IRVar x -> return x
                _ -> do
                  x <- newVar' (Just "_matchee")
-                 tell [ IRDef (typeOf e0) x $ Just e0' ]
+                 t0 <- lowerType (typeOf e0)
+                 tell [ IRDef t0 x $ Just e0' ]
                  return $ x
         lowerCases x t cs
       ETup _ _ -> error "Tuples are not supported yet"
@@ -132,22 +166,45 @@ lowerExpr e =
 lookupTypeDef :: Type -> Lowering IRTypeDef
 lookupTypeDef t@(TVar _) = error $ "Type variable during lowering: " ++ (show t)
 lookupTypeDef t@(TFun _ _) = error $ "Tried to lookup a function type: " ++ (show t)
-lookupTypeDef t@(TCons _ []) = do
-  tds <- lstTypeInsts <$> get
-  case M.lookup t tds of
-    Nothing -> error $ "Couldn't resolve type: " ++ (show t)
+lookupTypeDef t@(TCons c ts) = do
+  tis <- lstTypeInsts <$> get
+  case M.lookup t tis of
+    Nothing -> do
+        tds <- lstKnownTypes <$> get
+        case M.lookup c tds of
+          Nothing -> error $ "Couldn't resolve type: " ++ (show t)
+          Just td -> do
+            td' <- instanciateType ts td
+            modify (\s -> s { lstTypeInsts = M.insert t td' $ lstTypeInsts s })
+            return td'
     Just td -> return td
-lookupTypeDef t = error $ "Parametric types are not yet supported: " ++ (show t)
+
+lowerType :: Type -> Lowering IRType
+lowerType (TCons x@(Ident "int" Nothing Nothing) []) = return $ IRType x
+lowerType (TCons x@(Ident "bool" Nothing Nothing) []) = return $ IRType x
+lowerType (TCons x@(Ident "()" Nothing Nothing) []) = return $ IRType x
+lowerType t = do
+  td <- lookupTypeDef t
+  return $ IRType $ typeDefName td
+
+instanciateType :: [Type] -> TypeDef -> Lowering IRTypeDef
+instanciateType ts td@(TypeDef tn _ _) = do
+  let ss = Subst $ M.fromList $ zip [0 :: Int ..] ts
+  let td' = subst ss td
+  let instSuffix = T.concat $ "_" : (intersperse "_" $ map encodeType $ map MonoType $ tdParams td')
+  lowerTypeDef $ td' { tdName = (tn `suffixId` instSuffix) }
 
 lowerPattern :: TPat -> IRExpr -> [IRStmt] -> Lowering ([IRExpr], [IRStmt])
 lowerPattern (PHole _) _ bs = return ([], bs)
 lowerPattern (PLit _ l) path bs = return ([IROp OpEq [path, IRLit $ lowerLit l]], bs)
-lowerPattern (PBinding t x) path bs = return ([], bs ++ [IRDef t x $ Just path])
+lowerPattern (PBinding t x) path bs = do
+  t' <- lowerType t
+  return ([], bs ++ [IRDef t' x $ Just path])
 lowerPattern (PCons t c ps) path bs = do
   td <- lookupTypeDef t
   case td of
     IRCType _ _ -> error $ "Tried to match a ctype with a constructor? " ++ (show c) ++ " : " ++ (show t)
-    IREnumType tn _ -> return ([IROp OpEq [path, IRCons tn c []]], bs)
+    IREnumType tn _ -> return ([IROp OpEq [path, IRCons (IRType tn) c []]], bs)
     IRStructType _ (IRRecord _ fs) -> lowerRecordPattern ps bs path fs
     IRTaggedType tn rs -> do
       case find (\(IRRecord c0 _) -> c == c0) rs of
@@ -156,7 +213,7 @@ lowerPattern (PCons t c ps) path bs = do
           (cs, bs') <- lowerRecordPattern ps bs (IRField path c) fs
           return ((IRCheckVariant path tn c):cs, bs')
 
-lowerRecordPattern :: [TPat] -> [IRStmt] -> IRExpr -> [(Type, Ident)]
+lowerRecordPattern :: [TPat] -> [IRStmt] -> IRExpr -> [(IRType, Ident)]
                    -> Lowering ([IRExpr], [IRStmt])
 lowerRecordPattern ps bs0 path fs =
     foldM (\(cs, bs) ((_, f), p) -> do
@@ -165,10 +222,11 @@ lowerRecordPattern ps bs0 path fs =
     ([], bs0)
     (zip fs ps)
 
-lowerCases :: Ident -> IRType -> [TCase] -> Lowering IRExpr
+lowerCases :: Ident -> Type -> [TCase] -> Lowering IRExpr
 lowerCases matchVar rTy cases = do
   r <- newVar' (Just "_phi")
-  irDef rTy r Nothing
+  rTy' <- lowerType rTy
+  irDef rTy' r Nothing
   makeIfElseChain =<< mapM (lowerCase r) cases
   return $ IRVar r
   where
@@ -215,17 +273,10 @@ instanciateFunc fx ft = do
                     ++ (show fx) ++ " as " ++ (show ft)
                     ++ ": " ++ (show err)
                   Right f' -> do
-                    fx' <- refreshName $ fName f'
+                    let fx' = (fName f') `suffixId` (T.append "_" $ encodeType $ MonoType ft)
                     f'' <- lowerFunction $ f' { fName = fx' }
                     modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f'' (lstFuncInsts s) })
                     return fx'
-  where
-    refreshName (Ident x ns mI) = do
-      let x' = case mI of
-                Nothing -> x
-                Just i -> T.concat [ x, "_", (T.pack $ show i), "_inst__" ]
-      (Ident _ _ i') <- newVar
-      return $ Ident x' ns i'
 
 lowerFunction :: TFunction -> Lowering IRFunc
 lowerFunction f = do
@@ -235,39 +286,44 @@ lowerFunction f = do
                                       Just x -> x
                     PolyType _ _ -> error $ "Polymorphic functions are not supported: " ++ (show $ fType f)
   (_, body) <- stmts $ lowerBody $ fBody f
+  let args = filter (((/=) tUnit) . snd) $ fArgs f
+  argsTs <- mapM (\(x, t) -> ((,) x) <$> (lowerType t)) $ args
+  retT' <- lowerType retT
   let f' = IRFunc { irfName  = fName f
-                  , irfRetTy = retT
-                  , irfArgs  = fArgs f
+                  , irfRetTy = retT'
+                  , irfArgs  = argsTs
                   , irfBody  = body }
   modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
   return f'
 
-lowerType :: TypeDef -> Lowering IRTypeDef
-lowerType td@(TypeDef n _) = do
-  x <- lowerType' td
-  modify (\s -> s { lstTypeInsts = M.insert (TCons n []) x $ lstTypeInsts s })
-  return x
-lowerType' :: TypeDef -> Lowering IRTypeDef
-lowerType' (TypeDef n (TBCType ct)) = return $ IRCType n ct
-lowerType' (TypeDef _ (TBConses [])) = error $ "Zero types are not supported yet"
-lowerType' (TypeDef n (TBConses [(TypeCons c ts)])) = do
-  let r = IRRecord c $ zip ts unnamedFields
+lowerTypeDef :: TypeDef -> Lowering IRTypeDef
+lowerTypeDef (TypeDef n _ (TBCType ct)) = return $ IRCType n ct
+lowerTypeDef (TypeDef _ _ (TBConses [])) = error $ "Zero types are not supported yet"
+lowerTypeDef (TypeDef n _ (TBConses [(TypeCons c ts)])) = do
+  ts' <- mapM lowerType ts
+  let r = IRRecord c $ zip ts' unnamedFields
   return $ IRStructType n r
-lowerType' (TypeDef n (TBConses cs)) = do
+lowerTypeDef (TypeDef n _ (TBConses cs)) = do
   if allTags
   then return $ IREnumType n $ reverse variants
-  else return $ IRTaggedType n rs
+  else do
+    rs <- mapM (\(TypeCons c ts) -> do
+                    ts' <- mapM lowerType ts
+                    return $ IRRecord c $ zip ts' unnamedFields)
+           cs
+    return $ IRTaggedType n rs
   where
     (allTags, variants) =
       foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), v : vs)) (True, []) cs
-    rs = map (\(TypeCons c ts) -> IRRecord c $ zip ts unnamedFields) cs
 
 lowerProgram :: [TypeDef] -> TFunction -> Lowering IRProgram
 lowerProgram types f = do
-  types' <- mapM lowerType types
+  let tds = M.fromList $ map (\t@(TypeDef tn _ _) -> (tn, t)) types
+  modify (\s -> s { lstKnownTypes =  M.union (lstKnownTypes s) tds })
   _ <- lowerFunction f
   fs <- lstFuncs <$> get
-  return $ IRProgram { irpTypes = types', irpFuncs = reverse fs }
+  tyInsts <- lstTypeInsts <$> get
+  return $ IRProgram { irpTypes = M.elems tyInsts, irpFuncs = reverse fs }
 
 lowerToIR :: [TypeDef] -> TFunction -> IRProgram
 lowerToIR tds ast = runLowering $ lowerProgram tds ast

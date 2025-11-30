@@ -8,6 +8,7 @@ import Fy.Ast
 
 import Prelude hiding (lookup, lines)
 import qualified Data.Set as S
+import Data.List (elemIndex)
 import Data.Set (Set)
 import Control.Monad (when, foldM)
 import Control.Monad.State
@@ -181,35 +182,45 @@ checkFunction f xs e = do
 checkImplicitMain :: UExpr -> Naming UFunction
 checkImplicitMain e = checkFunction (mkId "__fy_main") [] e
 
-checkType :: Type -> Naming ()
-checkType (TVar _) = error "Parametric types are not supported yet"
-checkType (TCons x ts) = do
-  t <- ((M.lookup x) . nstTypes) <$> get
-  case t of
-    Nothing -> throwError $ UndefinedType x
-    Just _ -> mapM_ checkType ts
-checkType (TFun ts t) = (checkType t) >> (mapM_ checkType ts)
+checkType :: [Ident] -> Type -> Naming Type
+checkType _ (TVar _) = error "Parametric types are not supported yet"
+checkType ps (TCons x ts) = do
+  types <- nstTypes <$> get
+  case elemIndex x ps of
+    Nothing | not $ M.member x types -> throwError $ UndefinedType x
+    Just t | null ts -> return $ TVar t
+    Just _ -> error "Can't use a type-variable as a constructor"
+    _ -> (TCons x) <$> mapM (checkType ps) ts
+checkType ps (TFun ts t) = TFun <$> (mapM (checkType ps) ts) <*> (checkType ps t)
 
-checkTypeDef :: TypeDef -> Naming ()
-checkTypeDef (TypeDef _ (TBCType _)) = return ()
-checkTypeDef (TypeDef _ (TBConses cs)) = do
-  mapM_ checkAndIntroCons cs
+checkTypeDef :: TypeDef -> Naming TypeDef
+checkTypeDef td@(TypeDef _ _ (TBCType _)) = return td
+checkTypeDef (TypeDef tn tPrms (TBConses cs)) = do
+  cs' <- mapM checkAndIntroCons cs
+  return $ TypeDef tn (take (length tPrms) $ map TVar [0 :: Int ..]) (TBConses cs')
   where
+    ps = map (\pt ->
+                  case pt of
+                    TCons ct [] -> ct
+                    _ -> error $ "Type definition paramter was not a variable: " ++ (show pt))
+           tPrms
     checkAndIntroCons (TypeCons c ts) = do
-      mapM_ checkType ts
+      ts' <- mapM (checkType ps) ts
       modify (\s -> s { nstScope = M.insert c (NameEntry c NKCons) $ nstScope s })
+      return $ TypeCons c ts'
 
-checkTypeDefs :: [TypeDef] -> Naming ()
+checkTypeDefs :: [TypeDef] -> Naming [TypeDef]
 checkTypeDefs tds = do
   modify (\s -> s { nstTypes = M.fromList $ builtins ++ (map (\td -> (tdName td, Just $ tdBody td)) tds) } )
-  mapM_ checkTypeDef tds
+  mapM checkTypeDef tds
   where
     builtins = map (\x -> (mkId x, Nothing)) ["int", "()"]
 
-checkProgram :: UProgram -> Naming UFunction
+checkProgram :: UProgram -> Naming ([TypeDef], UFunction)
 checkProgram (Program tds e) = do
-  checkTypeDefs tds
-  checkImplicitMain e
+  tds' <- checkTypeDefs tds
+  f <- checkImplicitMain e
+  return (tds', f)
 
-namingCheck :: UProgram -> Either NamingError UFunction
+namingCheck :: UProgram -> Either NamingError ([TypeDef], UFunction)
 namingCheck p = runNaming M.empty (checkProgram p)

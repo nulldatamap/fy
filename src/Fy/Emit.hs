@@ -13,6 +13,8 @@ import Data.List (intersperse)
 import Control.Monad (when)
 import Control.Monad.RWS
 
+import Data.Graph (stronglyConnComp, SCC(..))
+
 type Identation = Int
 
 type Emitter a = RWS Identation [Text] () a
@@ -70,12 +72,27 @@ emitProgram p = runEmitter $ do
         , "#include <stdlib.h>"
         , ""
         ]
-  mapM_ (\td -> (emitTypeDef td) >> (emitConses td)) $ irpTypes p
+  emitTypeDefs $ irpTypes p
   mapM_ emitFunction $ irpFuncs p
   lines [ "int main(int argc, const char** argv) {"
         , "  printf(\"Result: %d\\n\", __fy_main());"
         , "  return 0;"
         , "}" ]
+
+emitTypeDefs :: [IRTypeDef] -> Emitter ()
+emitTypeDefs tds = do
+  mapM_ (\scc ->
+          case scc of
+            NECyclicSCC xs -> error $ "Recursive types are not supported yet: " ++ (show xs)
+            AcyclicSCC td -> do
+              emitTypeDef td
+              emitConses td)
+    (stronglyConnComp $ map typeDepGraph tds)
+  where
+    typeDepGraph td@(IRStructType tn r) = (td, tn, recordDeps r)
+    typeDepGraph td@(IRTaggedType tn rs) = (td, tn, concat $ map recordDeps rs)
+    typeDepGraph td = (td, typeDefName td, [])
+    recordDeps (IRRecord _ fs) = map (\(IRType tn, _) -> tn) fs
 
 emitFunction  :: IRFunc -> Emitter ()
 emitFunction f = do
@@ -84,8 +101,7 @@ emitFunction f = do
     emit " "
     emitIdent $ irfName f
     parens $ do
-      let prms = filter ((/= tUnit) . snd) $ irfArgs f
-      seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) prms
+      seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) $ irfArgs f
     emit " "
     braceBlock $ do
       emitStmts $ irfBody f
@@ -133,9 +149,9 @@ emitExpr (IROp o [x, y]) =
         OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
         OpEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
-emitExpr (IRCons t x es) = do
+emitExpr (IRCons (IRType tn) x es) = do
   emit "MK_"
-  emitIdent t
+  emitIdent tn
   emit "_"
   emitIdent x
   parens $ seperated ", " emitExpr es
@@ -160,12 +176,11 @@ emitIdent :: Ident -> Emitter ()
 emitIdent x = emit $ canonicalId x
 
 emitType :: IRType -> Emitter ()
-emitType t@(TVar _) = error $ "Type variable present at emti-stage: " ++ (show t)
-emitType (TCons (Ident "int" Nothing Nothing) []) = emit "int"
-emitType (TCons (Ident "bool" Nothing Nothing) []) = emit "bool"
-emitType (TCons (Ident "()" Nothing Nothing) []) = emit "void"
-emitType (TCons x []) = emitIdent x
-emitType t = error $ "Unsupported type: " ++ (show t)
+emitType (IRType (Ident "int" Nothing Nothing)) = emit "int"
+emitType (IRType (Ident "bool" Nothing Nothing)) = emit "bool"
+emitType (IRType (Ident "()" Nothing Nothing)) = emit "void"
+emitType (IRType x) = emitIdent x
+-- emitType t = error $ "Unsupported type: " ++ (show t)
 
 emitEnum :: Ident -> Bool -> [Ident] -> Emitter ()
 emitEnum t isVariant vs = do

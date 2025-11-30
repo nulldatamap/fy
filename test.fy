@@ -3,16 +3,15 @@
 : Pos = | Pos int int
 : Rect = | Rect Pos Pos
 : MyBool = | True | False
-: OptInt = | Some int
-           | None
+: Opt a = | Some a | None
 : Bar = | High int
-        | Low OptInt
+        | Low (Opt int)
 : Foo = | Foo Bar
         | Foo2 Bar Bar
         | Foone
 
 if $$eq 1 1
-then (Foo2 (High 3)
+then id (Foo2 (High (double (wooz () ($$eq 1 2) xy 2)))
            (Low None))
      | (Foo2 (High x) z) -> x
 else -100
@@ -21,6 +20,7 @@ else -100
 . x = $$add ($$add 1 1) ($$add 2 3)
 . y = $$add x w
 . w = (q . q = 3)
+. wooz a b c d = 3
 . k x = ($$add (f x) 1 . f x = $$add 0 x)
 . id x = x
 . double x = $$add x x

@@ -107,15 +107,23 @@ runTyping :: Typing a -> Either TypingError a
 runTyping t = runExcept $ evalStateT t defaultTypingSt
 
 introTypeConses :: TypeDef -> Typing ()
-introTypeConses (TypeDef _ (TBCType _)) = return ()
-introTypeConses (TypeDef t (TBConses cs)) = mapM_ (introTypeCons (TCons t [])) cs
+introTypeConses (TypeDef _ _ (TBCType _)) = return ()
+introTypeConses (TypeDef t ps (TBConses cs)) = mapM_ (introTypeCons ps (TCons t ps)) cs
 
-introTypeCons :: Type -> TypeCons -> Typing ()
-introTypeCons t (TypeCons c ts) =
+introTypeCons :: [Type] -> Type -> TypeCons -> Typing ()
+introTypeCons ps t (TypeCons c ts) =
   let ct = case ts of
              [] -> t
              _ -> TFun ts t
-  in modify (\s -> s { env = M.insert c (MonoType ct) $ env s })
+      ct' = case ps of
+             [] -> MonoType ct
+             _ -> PolyType (map (\pt ->
+                                   case pt of
+                                     TVar tv -> tv
+                                     _ -> error $ "Type definition parameter is not a type variable: " ++ (show pt))
+                              ps)
+                    ct
+  in modify (\s -> s { env = M.insert c ct' $ env s })
 
 
 inferFunction :: UFunction -> Typing TFunction

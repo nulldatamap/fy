@@ -1,8 +1,9 @@
 module Fy.Ir
   ( Operator(..)
-  , IRType, IRTypeDef(..), IRRecord(..)
+  , IRType(..), IRTypeDef(..), IRRecord(..)
   , IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
   , IRProgram(..)
+  , typeDefName, irtUnit
   ) where
 
 
@@ -15,9 +16,10 @@ data Operator = OpAdd
               | OpAnd
               deriving (Show, Eq)
 
-type IRType = Type
+data IRType = IRType Ident
+  deriving (Show, Eq)
 
-data IRRecord = IRRecord Ident [(Type, Ident)]
+data IRRecord = IRRecord Ident [(IRType, Ident)]
   deriving (Show)
 
 data IRTypeDef = IREnumType Ident [Ident]
@@ -33,7 +35,7 @@ data IRLit = IRInt Integer
 data IRExpr = IRVar Ident
             | IROp Operator [IRExpr]
             | IRCall Ident [IRExpr]
-            | IRCons Ident Ident [IRExpr]
+            | IRCons IRType Ident [IRExpr]
             | IRLit IRLit
             | IRField IRExpr Ident
             | IRCheckVariant IRExpr Ident Ident
@@ -55,3 +57,12 @@ data IRFunc = IRFunc { irfName  :: Ident
 
 data IRProgram = IRProgram { irpTypes :: [IRTypeDef], irpFuncs :: [IRFunc] }
             deriving (Show)
+
+irtUnit :: IRType
+irtUnit = IRType (Ident "()" Nothing Nothing)
+
+typeDefName :: IRTypeDef -> Ident
+typeDefName (IREnumType n _) = n
+typeDefName (IRStructType n _) = n
+typeDefName (IRTaggedType n _) = n
+typeDefName (IRCType n _) = n

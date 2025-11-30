@@ -117,7 +117,7 @@ instance Substitutable TypeScheme where
 instance Show Type where
   show (TVar x) = "'t" ++ show x
   show (TCons x []) = show x
-  show (TCons x ts) = "(" ++ (show x) ++ (intercalate " " $ map show ts) ++  ")"
+  show (TCons x ts) = "(" ++ (intercalate " " $ (show x) : (map show ts)) ++  ")"
   show (TFun ts t) = "(" ++ (intercalate ", " $ map show ts) ++ " -> " ++ (show t) ++ ")"
 
 instance Show a => Show (TypeSchemeT a)  where
@@ -129,6 +129,7 @@ mkId x = Ident x Nothing Nothing
 
 suffixId :: Ident -> Text -> Ident
 suffixId (Ident x ns i) s = Ident (T.append x s) ns i
+
 canonicalId :: Ident -> Text
 canonicalId (Ident n mNs mI) = T.concat $ prefix ++ (n : suffix)
   where

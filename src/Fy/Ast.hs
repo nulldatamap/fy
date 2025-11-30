@@ -17,10 +17,14 @@ import Data.Set (Set)
 
 data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
   deriving (Show)
+
 data TypeBody = TBConses [TypeCons]
               | TBCType Text
   deriving (Show)
-data TypeDef = TypeDef { tdName :: Ident, tdBody :: TypeBody }
+
+data TypeDef = TypeDef { tdName :: Ident
+                       , tdParams :: [Type]
+                       , tdBody :: TypeBody }
   deriving (Show)
 
 data Program t = Program { pTypeDefs :: [TypeDef], pBody :: (Expr t) }
@@ -123,6 +127,16 @@ instance Substitutable TFunction  where
 
 instance Substitutable (Expr Type) where
   subst s x = fmap (subst s) x
+
+instance Substitutable TypeCons where
+  subst s (TypeCons tn ms) = TypeCons tn $ map (subst s) ms
+
+instance Substitutable TypeBody where
+  subst s (TBConses cs) = TBConses $ map (subst s) cs
+  subst _ x = x
+
+instance Substitutable TypeDef where
+  subst s (TypeDef n ps b) = TypeDef n (map (subst s) ps) $ subst s b
 
 isFun :: ValOrFun t -> Bool
 isFun (Fun _) = True

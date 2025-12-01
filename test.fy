@@ -1,4 +1,10 @@
 -- Test program:
+Test
+-> CInt64, Pos, Opt, Bar, Foo
+<- Data/List = L
+<- Data/Maybe = M
+<- Data/Maybe/Maybe/*
+
 : CInt64 = $$ctype int64_t
 : Pos = | Pos int int
 : Rect = | Rect Pos Pos
@@ -10,13 +16,14 @@
         | Foo2 Bar Bar
         | Foone
 
-if $$eq 1 1
-then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) xy 2)))
-           (Bar/Low Opt/None))
-     | (Foo/Foo2 (Bar/High x) z) -> x
-else -100
+. main : -> ()
+       = if $$eq 1 1
+         then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) xy 2)))
+                           (Bar/Low Opt/None))
+              | (Foo/Foo2 (Bar/High x) z) -> x
+         else -100
 . qq = ()
-. wow x y z = x
+. wow x y z : a, b, c -> a = x
 . x = $$add ($$add 1 1) ($$add 2 3)
 . y = $$add x w
 . w = (q . q = 3)

@@ -1,16 +1,17 @@
 module Fy.Parser
   ( ParserErrorBundle
-  , parseProgram
+  , parseProgram, parseModule
   ) where
 
 
 import Fy.Types
 import Fy.Ast
 
-import Prelude hiding (lookup, lines)
+import Prelude hiding (lookup, lines, head)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Set as S
+import Data.Functor (($>))
 import Data.Char
 import Data.List (unsnoc)
 import Data.Maybe (fromMaybe)
@@ -91,63 +92,64 @@ pLit :: Parser Lit
 pLit =  (try $ symbol "(" *> symbol ")" *> (return LUnit))
     <|> (try $ LInt <$> pInteger)
 
-pExpr0 :: Parser UExpr
-pExpr0 =  ((ELit ()) <$> pLit)
+pSmallestExpr :: Parser UExpr
+pSmallestExpr =  ((ELit ()) <$> pLit)
       <|> pParenTupleOrUnit
       <|> ((EIdent ()) <$> pIdent)
       <|> ((EBuiltin ()) <$> pBuiltin)
-      <|> ((EIf ()) <$> ((symbol "if")   *> pExpr2)
-                    <*> ((symbol "then") *> pExpr2)
-                    <*> ((symbol "else"  *> pExpr2)))
+      <|> ((EIf ()) <$> ((symbol "if")   *> pCaseExpr)
+                    <*> ((symbol "then") *> pCaseExpr)
+                    <*> ((symbol "else"  *> pCaseExpr)))
   where
     pParenTupleOrUnit = do
-      es <- pParens $ pExpr `sepBy1` (symbol ",")
+      es <- pParens $ pFullExpr `sepBy1` (symbol ",")
       return $
         case es of
             []  -> ELit () LUnit
             [e] -> e
             _  -> error "Tuples are not supported yet"
 
-pExpr1 :: Parser UExpr
-pExpr1 = do
-  e <- pExpr0
-  es <- many pExpr0
+pAppExpr :: Parser UExpr
+pAppExpr = do
+  e <- pSmallestExpr
+  es <- many pSmallestExpr
   return $
     case es of
       [] -> e
       _  -> EApp () e es
 
-pExpr2 :: Parser UExpr
-pExpr2 = do
-  e <- pExpr1
+pCaseExpr :: Parser UExpr
+pCaseExpr = do
+  e <- pAppExpr
   cases <- many pCase
   case cases of
     [] -> return e
     _ -> return $ ECase () e cases
   where
-    pCase = (\p e -> Case p [] e) <$> (symbol "|" *> pPat) <*> (symbol "->" *> pExpr1)
+    pCase = (\p e -> Case p [] e) <$> (symbol "|" *> pPat) <*> (symbol "->" *> pAppExpr)
 
-pExpr3 :: Parser UExpr
-pExpr3 = do
-  e <- pExpr2
+pLetExpr :: Parser UExpr
+pLetExpr = do
+  e <- pCaseExpr
   bs <- many pBinding
   return $
     case bs of
         [] -> e
         _ -> ELet () bs e
-  where
-    pBinding = do
-      x    <- symbol "." *> pIdent
-      args <- many pIdent
-      body <- symbol "=" *> pExpr2
-      return $
-        if null args
-        then Local (MonoType ()) x (S.empty) $ Val body
-        else Local (MonoType ()) x (S.empty) $
-               Fun $ Function x (MonoType ()) (zip args $ repeat ()) (S.empty) body
 
-pExpr :: Parser UExpr
-pExpr = pExpr3
+pFullExpr :: Parser UExpr
+pFullExpr = pLetExpr
+
+pBinding :: Parser ULocal
+pBinding = do
+  x    <- symbol "." *> pIdent
+  args <- many pIdent
+  body <- symbol "=" *> pCaseExpr
+  return $
+    if null args
+    then Local (MonoType ()) x (S.empty) $ Val body
+    else Local (MonoType ()) x (S.empty) $
+           Fun $ Function x (MonoType ()) (zip args $ repeat ()) (S.empty) body
 
 pPat' :: Parser UPat
 pPat' =  (symbol "_" *> (return $ PHole ()))
@@ -193,7 +195,49 @@ pTypeDef = do
       <|> (TBConses <$> (many (TypeCons <$> (symbol "|" *> pIdent) <*> (many pType'))))
 
 pProgram :: Parser UProgram
-pProgram = sc *> (Program <$> (many pTypeDef) <*> pExpr) <* eof
+pProgram = sc *> (Program <$> (many pTypeDef) <*> pLetExpr) <* eof
+
+data ItemKind = IKImport  PathItem
+              | IKExport  PathItem
+              | IKTypeDef TypeDef
+              | IKFunc    ULocal
+
+pPathItem :: Parser PathItem
+pPathItem = do
+  (path, head) <- pPathPart
+  alias <- pAliasPart
+  return $ PathItem path head alias
+  where
+    pPathPart = lexeme $ do
+      root <- pIdent'
+      steps <- many (try $ string "/" *> pIdent')
+      head <- optional $  (string "*" $> Nothing)
+                      <|> (Just <$> (pParens $ pIdent `sepBy` (symbol ",")))
+      return (root : steps, head)
+    pAliasPart = optional $ symbol "=" *> pIdent
+
+pModule :: Parser UModule
+pModule = do
+  name <- pIdent <?> "Module name"
+  items <- many ((IKImport <$> (symbol "<-" *> pPathItem))
+                 <|> (IKExport <$> (symbol "->" *> pPathItem))
+                 <|> (IKTypeDef <$> pTypeDef)
+                 <|> (IKFunc <$> pBinding))
+  let (ins, outs, tys, bs) = intoBuckets items
+  return $ Module name ins outs tys bs
+  where
+    intoBuckets items =
+      foldr (\ik (ins, outs, tys, bs) ->
+               case ik of
+                 IKImport  x -> (x:ins,   outs,   tys,   bs)
+                 IKExport  x -> (  ins, x:outs,   tys,   bs)
+                 IKTypeDef x -> (  ins,   outs, x:tys,   bs)
+                 IKFunc    x -> (  ins,   outs,   tys, x:bs))
+        ([], [], [], [])
+        items
+
+parseModule :: String -> Text -> Either ParserErrorBundle UModule
+parseModule = parse pModule
 
 parseProgram :: String -> Text -> Either ParserErrorBundle UProgram
 parseProgram = parse pProgram

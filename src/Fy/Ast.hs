@@ -3,8 +3,9 @@ module Fy.Ast
   , Program(..), Builtin(..), ValOrFun(..)
   , Local(..), Function(..), Lit(..)
   , Case(..), Expr(..), Pat(..)
-  , UProgram, UPat, UCase, UExpr, UFunction
-  , TProgram, TPat, TCase, TExpr, TFunction
+  , Module(..), PathItem(..)
+  , UModule, UProgram, UPat, UCase, UExpr, UFunction, ULocal
+  , TModule, TProgram, TPat, TCase, TExpr, TFunction, TLocal
   , isFun
   ) where
 
@@ -14,6 +15,19 @@ import Fy.Types
 import Prelude hiding (lookup, lines)
 import Data.Text (Text)
 import Data.Set (Set)
+
+
+data PathItem = PathItem { piPath  :: [Text]
+                         , piHead  :: Maybe (Maybe [Ident])
+                         , piAlias :: Maybe Ident }
+  deriving (Show)
+
+data Module t = Module { mName :: Ident
+                       , mImports :: [PathItem]
+                       , mExports :: [PathItem]
+                       , mTypeDefs :: [TypeDef]
+                       , mItems :: [Local t] }
+  deriving (Show)
 
 data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
   deriving (Show)
@@ -37,6 +51,7 @@ data Builtin = BAdd
 data ValOrFun t = Val (Expr t) | Fun (Function t)
   deriving (Show, Functor, Foldable)
 
+-- TODO: Rename to binding or something like that
 data Local t = Local { lType :: TypeSchemeT t
                      , lName :: Ident
                      , lDeps :: Set Ident
@@ -81,17 +96,21 @@ data Expr t = ELit t Lit
             | ECons t Ident
     deriving (Show, Functor, Foldable)
 
+type UModule   = Module ()
 type UProgram  = Program ()
 type UPat      = Pat ()
 type UCase     = Case ()
 type UExpr     = Expr ()
 type UFunction = Function ()
+type ULocal    = Local ()
 
+type TModule   = Module Type
 type TProgram  = Program Type
 type TPat      = Pat Type
 type TCase     = Case Type
 type TExpr     = Expr Type
 type TFunction = Function Type
+type TLocal    = Local Type
 
 instance Typed Expr where
   withType f x@(ELit t _) = f t x

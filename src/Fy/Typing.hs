@@ -140,13 +140,16 @@ inferFunction f = do
                     , fDeps   = fDeps f
                     , fBody   = e' }
 
-inferWithSccLocals :: [SCC (Local ())] -> UExpr -> [Local Type] -> Typing ([Local Type], TExpr)
-inferWithSccLocals [] e ls' = do
-  e' <- inferExpr e
-  return (reverse ls', e')
-inferWithSccLocals ((NECyclicSCC xs):_) _ _ = throwError $ InvalidRecursion $ NE.map lName xs
-inferWithSccLocals ((AcyclicSCC l):ls) e ls' = do
-  (vof, t') <- case lBody l of
+inferBindings :: [UBinding] -> ([TBinding] -> Typing a) -> Typing a
+inferBindings ls innerF =
+  let sccs = stronglyConnComp $ map (\l -> (l, bName l, S.toList $ bDeps l)) ls
+  in inferWithSccBindings sccs innerF []
+
+inferWithSccBindings :: [SCC UBinding] -> ([TBinding] -> Typing a) -> [TBinding] -> Typing a
+inferWithSccBindings [] innerF ls' = innerF $ reverse ls'
+inferWithSccBindings ((NECyclicSCC xs):_) _ _ = throwError $ InvalidRecursion $ NE.map bName xs
+inferWithSccBindings ((AcyclicSCC l):ls) innerF ls' = do
+  (vof, t') <- case bBody l of
       Val e0 -> do
           e0' <- inferExpr e0
           t <- realize $ typeOf e0'
@@ -155,7 +158,7 @@ inferWithSccLocals ((AcyclicSCC l):ls) e ls' = do
       Fun f  -> do
         f' <- inferFunction f
         return (Fun f', fType f')
-  scoped [(lName l, t')] $ inferWithSccLocals ls e ((Local t' (lName l) (lDeps l) vof):ls')
+  scoped [(bName l, t')] $ inferWithSccBindings ls innerF ((Binding t' (bName l) (bDeps l) vof):ls')
 
 typeOfName :: Ident -> Typing Type
 typeOfName x = lookup x >>= instanciate
@@ -191,8 +194,7 @@ inferExpr (EIf _ e0 e1 e2) = do
   unify (typeOf e1') (typeOf e2')
   return $ EIf (typeOf e1') e0' e1' e2'
 inferExpr (ELet _ ls e) = do
-  let sccs = stronglyConnComp $ map (\l -> (l, lName l, S.toList $ lDeps l)) ls
-  (ls', e') <- inferWithSccLocals sccs e []
+  (ls', e') <- inferBindings ls (\ls0 -> ((,) ls0) <$> inferExpr e)
   return $ ELet (typeOf e') ls' e'
 inferExpr (ECase _ e cs) = do
   e' <- inferExpr e
@@ -228,11 +230,8 @@ inferPat (PCons () c ps) = do
     _  -> unify ct (TFun (map typeOf ps') t)
   return $ PCons t c ps'
 
-infer :: [TypeDef] -> UFunction -> Either TypingError TFunction
-infer tds f = runTyping $ do
-    mapM_ introTypeConses tds
-    f' <- inferFunction f
-    mainTy <- (TFun []) <$> fresh
-    fty <- instanciate $ fType f'
-    unify mainTy fty
-    realize f'
+infer :: UModule -> Either TypingError TModule
+infer m = runTyping $ do
+    mapM_ introTypeConses $ mTypeDefs m
+    is <- inferBindings (mItems m) return
+    return $ Module (mName m) (mImports m) (mExports m) (mTypeDefs m) is

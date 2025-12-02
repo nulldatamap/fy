@@ -80,15 +80,15 @@ irDef' t x v =
 irDef :: IRType -> Ident -> (Maybe IRExpr) -> Lowering ()
 irDef t x v = tell $ irDef' t x v
 
-lowerLocal :: Local Type -> Lowering ()
-lowerLocal l@(Local t x _ (Val e)) = do
+lowerBinding :: TBinding -> Lowering ()
+lowerBinding l@(Binding t x _ (Val e)) = do
   e' <- lowerExpr e
   case t of
     MonoType t0 -> do
       t0' <- lowerType t0
       irDef t0' x (Just e')
     _ -> error $ "Can't lower a polytype local: " ++ (show l)
-lowerLocal (Local _ x _ (Fun f)) =
+lowerBinding (Binding _ x _ (Fun f)) =
   modify (\s -> s { lstKnownFuncs = M.insert x f (lstKnownFuncs s) } )
 
 stmts :: Lowering a -> Lowering (a, [IRStmt])
@@ -136,7 +136,7 @@ lowerExpr e =
             return $ IRCall fx' xs'
           _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show e)
       ELet _ ls e0 -> do
-        mapM_ lowerLocal ls
+        mapM_ lowerBinding ls
         lowerExpr e0
       EIf t e0 e1 e2 -> do
         r <- newVar' (Just "_phi")
@@ -316,14 +316,15 @@ lowerTypeDef (TypeDef n _ (TBConses cs)) = do
     (allTags, variants) =
       foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), v : vs)) (True, []) cs
 
-lowerProgram :: [TypeDef] -> TFunction -> Lowering IRProgram
-lowerProgram types f = do
-  let tds = M.fromList $ map (\t@(TypeDef tn _ _) -> (tn, t)) types
+lowerModule :: TModule -> Lowering IRProgram
+lowerModule m = do
+  let tds = M.fromList $ map (\t@(TypeDef tn _ _) -> (tn, t)) $ mTypeDefs m
   modify (\s -> s { lstKnownTypes =  M.union (lstKnownTypes s) tds })
-  _ <- lowerFunction f
+  _ <- mapM_ lowerBinding (mItems m)
+  instanciateFunc (mkId "main") (TFun [tUnit] tUnit)
   fs <- lstFuncs <$> get
   tyInsts <- lstTypeInsts <$> get
   return $ IRProgram { irpTypes = M.elems tyInsts, irpFuncs = reverse fs }
 
-lowerToIR :: [TypeDef] -> TFunction -> IRProgram
-lowerToIR tds ast = runLowering $ lowerProgram tds ast
+lowerToIR :: TModule -> IRProgram
+lowerToIR m = runLowering $ lowerModule m

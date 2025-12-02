@@ -13,7 +13,7 @@ import qualified Data.Text as T
 import qualified Data.Set as S
 import Data.Functor (($>))
 import Data.Char
-import Data.List (unsnoc)
+import Data.List (unsnoc, singleton)
 import Data.Maybe (fromMaybe)
 
 import Text.Megaparsec hiding (State)
@@ -92,8 +92,8 @@ pLit :: Parser Lit
 pLit =  (try $ symbol "(" *> symbol ")" *> (return LUnit))
     <|> (try $ LInt <$> pInteger)
 
-pSmallestExpr :: Parser UExpr
-pSmallestExpr =  ((ELit ()) <$> pLit)
+pTermExpr :: Parser UExpr
+pTermExpr =  ((ELit ()) <$> pLit)
       <|> pParenTupleOrUnit
       <|> ((EIdent ()) <$> pIdent)
       <|> ((EBuiltin ()) <$> pBuiltin)
@@ -111,8 +111,8 @@ pSmallestExpr =  ((ELit ()) <$> pLit)
 
 pAppExpr :: Parser UExpr
 pAppExpr = do
-  e <- pSmallestExpr
-  es <- many pSmallestExpr
+  e <- pTermExpr
+  es <- many pTermExpr
   return $
     case es of
       [] -> e
@@ -140,15 +140,15 @@ pLetExpr = do
 pFullExpr :: Parser UExpr
 pFullExpr = pLetExpr
 
-pBinding :: Parser ULocal
+pBinding :: Parser UBinding
 pBinding = do
   x    <- symbol "." *> pIdent
   args <- many pIdent
   body <- symbol "=" *> pCaseExpr
   return $
     if null args
-    then Local (MonoType ()) x (S.empty) $ Val body
-    else Local (MonoType ()) x (S.empty) $
+    then Binding (MonoType ()) x (S.empty) $ Val body
+    else Binding (MonoType ()) x (S.empty) $
            Fun $ Function x (MonoType ()) (zip args $ repeat ()) (S.empty) body
 
 pPat' :: Parser UPat
@@ -200,7 +200,7 @@ pProgram = sc *> (Program <$> (many pTypeDef) <*> pLetExpr) <* eof
 data ItemKind = IKImport  PathItem
               | IKExport  PathItem
               | IKTypeDef TypeDef
-              | IKFunc    ULocal
+              | IKFunc    UBinding
 
 pPathItem :: Parser PathItem
 pPathItem = do
@@ -210,20 +210,20 @@ pPathItem = do
   where
     pPathPart = lexeme $ do
       root <- pIdent'
-      steps <- many (try $ string "/" *> pIdent')
-      head <- optional $  (string "*" $> Nothing)
-                      <|> (Just <$> (pParens $ pIdent `sepBy` (symbol ",")))
+      steps <- many (try $ (string "/") *> pIdent')
+      head <- optional $  ((string "/*") $> Nothing)
+                      <|> (Just <$> ((string "/") *> (pParens $ pIdent `sepBy` (symbol ","))))
       return (root : steps, head)
     pAliasPart = optional $ symbol "=" *> pIdent
 
 pModule :: Parser UModule
 pModule = do
   name <- pIdent <?> "Module name"
-  items <- many ((IKImport <$> (symbol "<-" *> pPathItem))
-                 <|> (IKExport <$> (symbol "->" *> pPathItem))
-                 <|> (IKTypeDef <$> pTypeDef)
-                 <|> (IKFunc <$> pBinding))
-  let (ins, outs, tys, bs) = intoBuckets items
+  items <- many (((symbol "<-" *> ((IKImport <$> pPathItem) `sepBy1` (symbol ","))))
+                 <|> ((symbol "->" *> ((IKExport <$> pPathItem) `sepBy1` (symbol ","))))
+                 <|> ((singleton . IKTypeDef) <$> pTypeDef)
+                 <|> ((singleton . IKFunc) <$> pBinding))
+  let (ins, outs, tys, bs) = intoBuckets $ concat items
   return $ Module name ins outs tys bs
   where
     intoBuckets items =
@@ -237,7 +237,7 @@ pModule = do
         items
 
 parseModule :: String -> Text -> Either ParserErrorBundle UModule
-parseModule = parse pModule
+parseModule = parse (sc *> pModule <* eof)
 
 parseProgram :: String -> Text -> Either ParserErrorBundle UProgram
 parseProgram = parse pProgram

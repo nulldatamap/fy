@@ -81,35 +81,41 @@ withVars xs m = do
 
 scopedVars' :: [Ident] -> Naming a -> Naming ([Ident], a)
 scopedVars' xs m = do
+    d <- nstDepth <$> get
+    let isGlobal = d == 0
     (_, xs') <- foldM (\(seen, xs') x -> do
                           if x `S.member` seen
                           then throwError $ DuplicateNames [x]
                           else do
-                            x' <- uniqId x
-                            return (S.insert x seen, x':xs')) (S.empty, []) xs
-    d <- nstDepth <$> get
-    scoped (map (\(x, x') -> (x, NameEntry x' (NKLocal d))) $ zip xs xs') $ ((,) xs') <$> m
+                            x' <- if isGlobal then return x else uniqId x
+                            return (S.insert x seen, x':xs')) (S.empty, []) $ reverse xs
+    let nk = if isGlobal then NKGlobal else (NKLocal d)
+    scoped (map (\(x, x') -> (x, NameEntry x' nk)) $ zip xs xs') $ ((,) xs') <$> m
 
 scopedVars :: [Ident] -> Naming a -> Naming a
 scopedVars xs m = snd <$> scopedVars' xs m
 
-checkLocals :: [Local ()] -> UExpr -> Naming UExpr
+checkLocals :: [UBinding] -> UExpr -> Naming UExpr
 checkLocals ls e = do
-  (ls', e') <- scopedVars (map (\(Local { lName = x }) -> x) ls) $ do
-    ls' <- mapM checkLocal ls
+  (ls', e') <- scopedVars (map (\(Binding { bName = x }) -> x) ls) $ do
+    ls' <- mapM checkBinding ls
     e' <- checkExpr e
     return (ls', e')
   return $ ELet () ls' e'
 
-checkLocal :: Local () -> Naming (Local ())
-checkLocal (Local t x _ (Val e)) = do
+checkBindings :: [UBinding] -> Naming [UBinding]
+checkBindings ls = do
+  scopedVars (map bName ls) $ mapM checkBinding ls
+
+checkBinding :: UBinding -> Naming (Binding ())
+checkBinding (Binding t x _ (Val e)) = do
   (NameEntry x' _) <- lookup x
   (e', deps) <- block $ checkExpr e
-  return $ Local t x' deps (Val e')
-checkLocal (Local t x _ (Fun f)) = do
+  return $ Binding t x' deps (Val e')
+checkBinding (Binding t x _ (Fun f)) = do
    (NameEntry x' _) <- lookup x
    f' <- checkFunction x' (map fst $ fArgs f) (fBody f)
-   return $ Local t x' (S.empty) (Fun f')
+   return $ Binding t x' (fDeps f') (Fun f')
 
 checkPat :: UPat -> Naming (UPat, [(Ident, Ident)])
 checkPat p = do
@@ -159,7 +165,7 @@ checkExpr e =
       curDepth <- nstDepth <$> get
       addDeps $ neName ne
       case neKind ne of
-        NKLocal d | d /= curDepth -> throwError $ InvalidCapture (neName ne)
+        NKLocal d | d /= curDepth -> error $ "WOMP: " ++ (show x) ++ " : " ++ (show [d, curDepth]) -- throwError $ InvalidCapture (neName ne)
         NKLocal _ -> return $ ELocal () (neName ne)
         NKGlobal  -> return $ EGlobal () (neName ne)
         NKCons    -> return $ ECons () (neName ne)
@@ -229,11 +235,11 @@ checkTypeDefs tds = do
   where
     builtins = M.fromList $ map (\x -> (mkId x, Nothing)) ["int", "()"]
 
-checkProgram :: UProgram -> Naming ([TypeDef], UFunction)
-checkProgram (Program tds e) = do
-  tds' <- checkTypeDefs tds
-  f <- checkImplicitMain e
-  return (tds', f)
+checkModule :: UModule -> Naming UModule
+checkModule m = do
+  tds' <- checkTypeDefs $ mTypeDefs m
+  is <- checkBindings $ mItems m
+  return m { mTypeDefs = tds', mItems = is }
 
-namingCheck :: UProgram -> Either NamingError ([TypeDef], UFunction)
-namingCheck p = runNaming M.empty (checkProgram p)
+namingCheck :: UModule -> Either NamingError UModule
+namingCheck m = runNaming M.empty (checkModule m)

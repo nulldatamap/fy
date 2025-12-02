@@ -1,11 +1,11 @@
 module Fy.Ast
   ( TypeCons(..), TypeDef(..), TypeBody(..)
   , Program(..), Builtin(..), ValOrFun(..)
-  , Local(..), Function(..), Lit(..)
+  , Binding(..), Function(..), Lit(..)
   , Case(..), Expr(..), Pat(..)
   , Module(..), PathItem(..)
-  , UModule, UProgram, UPat, UCase, UExpr, UFunction, ULocal
-  , TModule, TProgram, TPat, TCase, TExpr, TFunction, TLocal
+  , UModule, UProgram, UPat, UCase, UExpr, UFunction, UBinding
+  , TModule, TProgram, TPat, TCase, TExpr, TFunction, TBinding
   , isFun
   ) where
 
@@ -26,7 +26,7 @@ data Module t = Module { mName :: Ident
                        , mImports :: [PathItem]
                        , mExports :: [PathItem]
                        , mTypeDefs :: [TypeDef]
-                       , mItems :: [Local t] }
+                       , mItems :: [Binding t] }
   deriving (Show)
 
 data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
@@ -51,11 +51,10 @@ data Builtin = BAdd
 data ValOrFun t = Val (Expr t) | Fun (Function t)
   deriving (Show, Functor, Foldable)
 
--- TODO: Rename to binding or something like that
-data Local t = Local { lType :: TypeSchemeT t
-                     , lName :: Ident
-                     , lDeps :: Set Ident
-                     , lBody :: ValOrFun t }
+data Binding t = Binding { bType :: TypeSchemeT t
+                         , bName :: Ident
+                         , bDeps :: Set Ident
+                         , bBody :: ValOrFun t }
   deriving (Show, Foldable, Functor)
 
 data Function t = Function { fName   :: Ident
@@ -86,7 +85,7 @@ data Expr t = ELit t Lit
             | EBuiltin t Builtin
             | EIdent t Ident
             | EApp t (Expr t) [Expr t]
-            | ELet t [Local t] (Expr t)
+            | ELet t [Binding t] (Expr t)
             | EIf t (Expr t) (Expr t) (Expr t)
             | ECase t (Expr t) [Case t]
             -- Never parsed:
@@ -102,7 +101,7 @@ type UPat      = Pat ()
 type UCase     = Case ()
 type UExpr     = Expr ()
 type UFunction = Function ()
-type ULocal    = Local ()
+type UBinding  = Binding ()
 
 type TModule   = Module Type
 type TProgram  = Program Type
@@ -110,7 +109,7 @@ type TPat      = Pat Type
 type TCase     = Case Type
 type TExpr     = Expr Type
 type TFunction = Function Type
-type TLocal    = Local Type
+type TBinding  = Binding Type
 
 instance Typed Expr where
   withType f x@(ELit t _) = f t x
@@ -135,9 +134,9 @@ instance Substitutable (ValOrFun Type) where
   subst s (Val v) = Val $ subst s v
   subst s (Fun f) = Fun $ subst s f
 
-instance Substitutable (Local Type) where
-  subst s l = l { lType = subst s $ lType l
-                , lBody = subst s $ lBody l }
+instance Substitutable (Binding Type) where
+  subst s l = l { bType = subst s $ bType l
+                , bBody = subst s $ bBody l }
 
 instance Substitutable TFunction  where
   subst s f = f { fBody = subst s $ fBody f

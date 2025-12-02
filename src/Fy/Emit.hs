@@ -135,19 +135,23 @@ emitStmt (IRPanic msg) = do
   emit msg
   emit "\"); exit(1); "
 
+chainedOp :: Bool -> Text -> Text -> [IRExpr] -> Emitter ()
+chainedOp _ _ base [] = emit base
+chainedOp True _ _ [x] = emitExpr (x)
+chainedOp False op _ [x] = error $ "Can't use chained op `" ++ (show op) ++ "` with only one argument: " ++ (show x)
+chainedOp _ op base xs = seperated op emitExpr xs
+
 emitExpr :: IRExpr -> Emitter ()
 emitExpr (IRVar x) = emitIdent x
 emitExpr (IRLit l) =
   case l of
     IRInt x -> emit $ T.pack $ show x
     IRVoid -> emit "/*void*/"
-emitExpr (IROp OpAnd []) = emit "1"
-emitExpr (IROp OpAnd [x]) = emitExpr x
-emitExpr (IROp OpAnd xs) = seperated " && " emitExpr xs
+emitExpr (IROp OpAnd xs) = chainedOp True " && " "1" xs
+emitExpr (IROp OpEq xs) = chainedOp False " == " "1" xs
 emitExpr (IROp o [x, y]) =
     case o of
         OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
-        OpEq  -> parens ((emitExpr x) >> (emit " == ") >> (emitExpr y))
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
 emitExpr (IRCons _ x es) = do
   emit "MK_"

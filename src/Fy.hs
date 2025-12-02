@@ -9,6 +9,7 @@ import System.Exit
 import System.Process
 import Text.Megaparsec
 
+import Fy.Ast
 import Fy.Parser
 import Fy.Naming
 import Fy.Typing
@@ -41,19 +42,18 @@ import Fy.Emit
 compileAndRun :: String -> IO ()
 compileAndRun f = do
   src <- TIO.readFile f
-  case parseProgram f src of
+  case parseModule f src of
     Left err -> do
       putStrLn $ errorBundlePretty err
       exitFailure
-    Right ast' -> do
-      let p = ast'
-      case namingCheck p of
+    Right m -> do
+      case namingCheck m of
         Left err -> putStrLn $ show err
-        Right (types, fn) -> do
-            case infer types fn of
+        Right m' -> do
+            case infer m' of
                 Left err -> putStrLn $ show err
-                Right ast -> do
-                  let ir = lowerToIR types ast
+                Right m'' -> do
+                  let ir = lowerToIR m''
                   let outF = f ++ ".c"
                   let out = emitProgram ir
                   TIO.writeFile outF out

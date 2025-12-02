@@ -20,10 +20,11 @@ Test
           then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) (Pos/Pos 2 3) 2)))
                             (Bar/Low Opt/None))
                | (Foo/Foo2 (Bar/High x) z) -> x
-          else -100
+          else second MyBool/True -100
 . double x = $$add x x
 . id x = x
 . wooz a b c d = 3
+. second a b = b
 -- . qq = ()
 -- . wow x y z = x
 -- . x = $$add ($$add 1 1) ($$add 2 3)

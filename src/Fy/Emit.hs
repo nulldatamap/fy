@@ -75,7 +75,7 @@ emitProgram p = runEmitter $ do
   emitTypeDefs $ irpTypes p
   mapM_ emitFunction $ irpFuncs p
   lines [ "int main(int argc, const char** argv) {"
-        , "  printf(\"Result: %d\\n\", __fy_main());"
+        , "  printf(\"Result: %d\\n\", __main());"
         , "  return 0;"
         , "}" ]
 
@@ -155,7 +155,7 @@ emitExpr (IROp o [x, y]) =
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
 emitExpr (IRCons _ x es) = do
   emit "MK_"
-  emitIdent x
+  emitIdent' x
   parens $ seperated ", " emitExpr es
 emitExpr (IRCall x es) = do
   emitIdent x
@@ -167,15 +167,18 @@ emitExpr (IRField e f) = do
                  _           -> parens
   mParen $ emitExpr e
   emit "."
-  emitIdent f
+  emitIdent' f
 emitExpr (IRCheckVariant e _ v) = do
   parens $ do
     emitExpr (IRField e variantField)
     emit " == "
     emitIdent $ v
 
+emitIdent' :: Ident -> Emitter ()
+emitIdent' x = emit $ canonicalId x
+
 emitIdent :: Ident -> Emitter ()
-emitIdent x = emit $ canonicalId x
+emitIdent x = emit "__" >> (emit $ canonicalId x)
 
 emitType :: IRType -> Emitter ()
 emitType (IRType (Ident "int" [] Nothing)) = emit "int"
@@ -194,8 +197,8 @@ emitEnum t isVariant vs = do
     emitIdent t
     when isVariant $ emit "__variant"
     line ";\n"
-emitStruct :: Ident -> IRRecord -> Emitter ()
-emitStruct n (IRRecord _ fs) = do
+emitStruct' :: Bool -> Ident -> IRRecord -> Emitter ()
+emitStruct' isField n (IRRecord _ fs) = do
   indent
   emit "struct "
   braceBlock $ do
@@ -203,12 +206,17 @@ emitStruct n (IRRecord _ fs) = do
               indent
               emitType t
               emit " "
-              emitIdent f
+              emitIdent' f
               line ";")
         fs
   emit " "
-  emitIdent n
+  if isField
+  then emitIdent' n
+  else emitIdent n
   line ";"
+
+emitStruct :: Ident -> IRRecord -> Emitter ()
+emitStruct n r = emitStruct' False n r
 
 emitTypeDef :: IRTypeDef -> Emitter ()
 emitTypeDef (IRCType t ct) = do
@@ -230,12 +238,12 @@ emitTypeDef (IRTaggedType t rs) = do
     indent
     emitIdent t
     emit "__variant "
-    emitIdent variantField
+    emitIdent' variantField
     line ";"
     indent
     emit "union "
     braceBlock $
-      mapM_ (\r@(IRRecord c _) -> emitStruct c r) rs
+      mapM_ (\r@(IRRecord c _) -> emitStruct' True c r) rs
     line ";"
   emit " "
   emitIdent t
@@ -246,37 +254,37 @@ emitConses (IRCType _ _) = return ()
 emitConses (IREnumType _ variants) = do
   mapM_ (\v -> do
             emit "#define MK_"
-            emitIdent v
+            emitIdent' v
             emit "() "
             emitIdent $ v
             line "") variants
   line ""
 emitConses (IRStructType t (IRRecord c fs)) = do
   emit "#define MK_"
-  emitIdent c
+  emitIdent' c
   let args = take (length fs) $ enumeratedIds "__arg"
-  parens $ seperated ", " emitIdent args
+  parens $ seperated ", " emitIdent' args
   emit " "
   parens $ emitIdent t
   emit " {"
-  seperated ", " emitIdent args
+  seperated ", " emitIdent' args
   line " }\n"
 emitConses (IRTaggedType t rs) = mapM_ emitCons rs >> line ""
   where
     emitCons (IRRecord c fs) = do
       emit "#define MK_"
-      emitIdent c
+      emitIdent' c
       let args = take (length fs) $ enumeratedIds "__arg"
-      parens $ seperated ", " emitIdent args
+      parens $ seperated ", " emitIdent' args
       emit " "
       parens $ emitIdent t
       emit " {."
-      emitIdent variantField
+      emitIdent' variantField
       emit " = "
       emitIdent $ c
       emit ", ."
-      emitIdent c
+      emitIdent' c
       emit " = {"
-      seperated ", " emitIdent args
+      seperated ", " emitIdent' args
       emit "}"
       line "}"

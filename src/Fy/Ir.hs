@@ -1,6 +1,6 @@
 module Fy.Ir
   ( Operator(..)
-  , IRType(..), IRTypeDef(..), IRRecord(..)
+  , IRType(..), IRTypeDef(..), IRRecord(..), IRVarDecl(..)
   , IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
   , IRProgram(..)
   , typeDefName, irtUnit
@@ -55,7 +55,15 @@ data IRFunc = IRFunc { irfName  :: Ident
                      , irfBody  :: [IRStmt] }
             deriving (Show)
 
-data IRProgram = IRProgram { irpTypes :: [IRTypeDef], irpFuncs :: [IRFunc] }
+data IRVarDecl = IRVarDecl { irvdName :: Ident
+                           , irvdType :: IRType }
+            deriving (Show)
+
+data IRProgram = IRProgram { irpName  :: Ident
+                           , irpTypes :: [IRTypeDef]
+                           , irpFuncs :: [IRFunc]
+                           , irpVars  :: [IRVarDecl]
+                           , irpInit  :: [IRStmt] }
             deriving (Show)
 
 irtUnit :: IRType

@@ -73,11 +73,33 @@ emitProgram p = runEmitter $ do
         , ""
         ]
   emitTypeDefs $ irpTypes p
+  mapM_ emitVarDecl $ irpVars p
   mapM_ emitFunction $ irpFuncs p
-  lines [ "int main(int argc, const char** argv) {"
-        , "  printf(\"Result: %d\\n\", __main());"
-        , "  return 0;"
-        , "}" ]
+  emitModuleInitializer (irpName p) $ irpInit p
+  emit "int main(int argc, const char** argv)"
+  braceBlock $ do
+    indent
+    emitIdent (irpName p)
+    line "__init();"
+    lines [ "  printf(\"Result: %d\\n\", __main());"
+          , "  return 0;" ]
+  line "\n"
+
+emitVarDecl :: IRVarDecl -> Emitter ()
+emitVarDecl (IRVarDecl x t) = do
+  emitType t
+  emit " "
+  emitIdent x
+  line ";\n"
+
+emitModuleInitializer :: Ident -> [IRStmt] -> Emitter ()
+emitModuleInitializer n sts = do
+  emit "void "
+  emitIdent n
+  emit "__init() "
+  braceBlock $ do
+    emitStmts sts
+  line "\n"
 
 emitTypeDefs :: [IRTypeDef] -> Emitter ()
 emitTypeDefs tds = do
@@ -139,7 +161,7 @@ chainedOp :: Bool -> Text -> Text -> [IRExpr] -> Emitter ()
 chainedOp _ _ base [] = emit base
 chainedOp True _ _ [x] = emitExpr (x)
 chainedOp False op _ [x] = error $ "Can't use chained op `" ++ (show op) ++ "` with only one argument: " ++ (show x)
-chainedOp _ op base xs = seperated op emitExpr xs
+chainedOp _ op _ xs = seperated op emitExpr xs
 
 emitExpr :: IRExpr -> Emitter ()
 emitExpr (IRVar x) = emitIdent x

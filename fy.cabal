@@ -34,6 +34,7 @@ library
       Fy.Parser
       Fy.Types
       Fy.Typing
+      Fy.Util
   other-modules:
       Paths_fy
   autogen-modules:

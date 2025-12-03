@@ -3,6 +3,7 @@ module Fy.Lowering
   ) where
 
 
+import Fy.Util
 import Fy.Types
 import Fy.Ast
 import Fy.Ir
@@ -80,6 +81,10 @@ irDef' t x v =
 irDef :: IRType -> Ident -> (Maybe IRExpr) -> Lowering ()
 irDef t x v = tell $ irDef' t x v
 
+registerFun :: TFunction -> Lowering ()
+registerFun f =
+  modify (\s -> s { lstKnownFuncs = M.insert (fName f) f (lstKnownFuncs s) } )
+
 lowerBinding :: TBinding -> Lowering ()
 lowerBinding l@(Binding t x _ (Val e)) = do
   e' <- lowerExpr e
@@ -88,8 +93,7 @@ lowerBinding l@(Binding t x _ (Val e)) = do
       t0' <- lowerType t0
       irDef t0' x (Just e')
     _ -> error $ "Can't lower a polytype local: " ++ (show l)
-lowerBinding (Binding _ x _ (Fun f)) =
-  modify (\s -> s { lstKnownFuncs = M.insert x f (lstKnownFuncs s) } )
+lowerBinding (Binding _ _ _ (Fun f)) = registerFun f
 
 stmts :: Lowering a -> Lowering (a, [IRStmt])
 stmts m = censor (const []) $ listen m
@@ -316,15 +320,41 @@ lowerTypeDef (TypeDef n _ (TBConses cs)) = do
     (allTags, variants) =
       foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), v : vs)) (True, []) cs
 
+lowerVals :: [TBinding] -> Lowering ([IRVarDecl], [IRStmt])
+lowerVals bs = stmts $
+  mapM (\b ->
+          case b of
+           (Binding t x _ (Val e)) -> do
+             let t0 = case t of
+                        MonoType mt -> mt
+                        _ -> error $ "Polymorphic values are not support yet: " ++ (show x) ++ " : " ++ (show t)
+             e' <- lowerExpr e
+             t0' <- lowerType t0
+             tell [ IRSet x e' ]
+             return $ IRVarDecl x t0'
+           _ -> error $ "Function binding passed to lowerVals: " ++ (show b))
+    bs
+
+
 lowerModule :: TModule -> Lowering IRProgram
 lowerModule m = do
   let tds = M.fromList $ map (\t@(TypeDef tn _ _) -> (tn, t)) $ mTypeDefs m
   modify (\s -> s { lstKnownTypes =  M.union (lstKnownTypes s) tds })
-  _ <- mapM_ lowerBinding (mItems m)
-  instanciateFunc (mkId "main") (TFun [tUnit] tUnit)
+  let (vals, funs) = partitionWith (\b ->
+                                      case b of
+                                        Binding _ _ _ (Fun f) -> Right f
+                                        _ -> Left b)
+                         (mItems m)
+  mapM_ registerFun funs
+  (vs, inits) <- lowerVals vals
+  _ <- instanciateFunc (mkId "main") (TFun [tUnit] tUnit)
   fs <- lstFuncs <$> get
   tyInsts <- lstTypeInsts <$> get
-  return $ IRProgram { irpTypes = M.elems tyInsts, irpFuncs = reverse fs }
+  return $ IRProgram { irpName  = mName m
+                     , irpTypes = M.elems tyInsts
+                     , irpFuncs = reverse fs
+                     , irpVars  = vs
+                     , irpInit  = inits }
 
 lowerToIR :: TModule -> IRProgram
 lowerToIR m = runLowering $ lowerModule m

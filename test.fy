@@ -17,7 +17,7 @@ Test
         | Foone
 
 . main x = if $$eq x ()
-          then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) (Pos/Pos 2 3) 2)))
+          then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) (Pos/Pos cool 3) 2)))
                             (Bar/Low Opt/None))
                | (Foo/Foo2 (Bar/High x) z) -> x
           else second MyBool/True -100
@@ -25,13 +25,12 @@ Test
 . id x = x
 . wooz a b c d = 3
 . second a b = b
--- . qq = ()
--- . wow x y z = x
--- . x = $$add ($$add 1 1) ($$add 2 3)
--- . y = $$add x w
--- . w = (q . q = 3)
+. cool = 3
+. x = $$add ($$add 1 1) ($$add 2 3)
+. y = $$add x w
+. w = (q . q = 3)
 -- . k x = ($$add (f x) 1 . f x = $$add 0 x)
--- . xy = Pos/Pos 2 3
--- . truth = MyBool/True
+. xy = Pos/Pos 2 3
+. truth = MyBool/True
 
 -- Cool huh?

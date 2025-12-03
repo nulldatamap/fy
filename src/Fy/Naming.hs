@@ -165,7 +165,7 @@ checkExpr e =
       curDepth <- nstDepth <$> get
       addDeps $ neName ne
       case neKind ne of
-        NKLocal d | d /= curDepth -> error $ "WOMP: " ++ (show x) ++ " : " ++ (show [d, curDepth]) -- throwError $ InvalidCapture (neName ne)
+        NKLocal d | d /= curDepth -> throwError $ InvalidCapture (neName ne)
         NKLocal _ -> return $ ELocal () (neName ne)
         NKGlobal  -> return $ EGlobal () (neName ne)
         NKCons    -> return $ ECons () (neName ne)

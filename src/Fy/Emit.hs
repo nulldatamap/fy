@@ -74,9 +74,10 @@ emitProgram p = runEmitter $ do
         ]
   emitTypeDefs $ irpTypes p
   mapM_ emitVarDecl $ irpVars p
+  line ""
   mapM_ emitFunction $ irpFuncs p
   emitModuleInitializer (irpName p) $ irpInit p
-  emit "int main(int argc, const char** argv)"
+  emit "\nint main(int argc, const char** argv)"
   braceBlock $ do
     indent
     emitIdent (irpName p)
@@ -90,7 +91,7 @@ emitVarDecl (IRVarDecl x t) = do
   emitType t
   emit " "
   emitIdent x
-  line ";\n"
+  line ";"
 
 emitModuleInitializer :: Ident -> [IRStmt] -> Emitter ()
 emitModuleInitializer n sts = do
@@ -99,7 +100,7 @@ emitModuleInitializer n sts = do
   emit "__init() "
   braceBlock $ do
     emitStmts sts
-  line "\n"
+  line ""
 
 emitTypeDefs :: [IRTypeDef] -> Emitter ()
 emitTypeDefs tds = do

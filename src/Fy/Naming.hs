@@ -110,7 +110,14 @@ checkBindings ls = do
 checkBinding :: UBinding -> Naming (Binding ())
 checkBinding (Binding t x _ (Val e)) = do
   (NameEntry x' _) <- lookup x
+  -- checkFunction always increments the depth, but the value equivalent
+  -- Does not (because we don't want to increase the depth through let-bindings)
+  -- But specifically in the case of top-level value bindings we need to increase
+  -- the depth, so that nested let-bindings aren't treated at globals
+  d <- nstDepth <$> get
+  modify (\s -> s { nstDepth = d + 1 })
   (e', deps) <- block $ checkExpr e
+  modify (\s -> s { nstDepth = d })
   return $ Binding t x' deps (Val e')
 checkBinding (Binding t x _ (Fun f)) = do
    (NameEntry x' _) <- lookup x
@@ -189,9 +196,6 @@ checkFunction f xs e = do
   (xs', (body, deps)) <- scopedVars' xs $ block (checkExpr e)
   modify (\s -> s { nstDepth = oldDepth })
   return $ Function f (MonoType ()) (map (\x -> (x, ())) xs') deps body
-
-checkImplicitMain :: UExpr -> Naming UFunction
-checkImplicitMain e = checkFunction (mkId "__fy_main") [] e
 
 checkType :: [Ident] -> Type -> Naming Type
 checkType _ (TVar _) = error "Parametric types are not supported yet"

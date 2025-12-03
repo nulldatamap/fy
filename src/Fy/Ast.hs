@@ -156,6 +156,11 @@ instance Substitutable TypeBody where
 instance Substitutable TypeDef where
   subst s (TypeDef n ps b) = TypeDef n (map (subst s) ps) $ subst s b
 
+instance Substitutable (Module Type) where
+  subst s m@(Module { mTypeDefs = ts, mItems = bs }) =
+    m { mTypeDefs = map (subst s) ts
+      , mItems = map (subst s) bs }
+
 isFun :: ValOrFun t -> Bool
 isFun (Fun _) = True
 isFun _       = False

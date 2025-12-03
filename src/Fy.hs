@@ -16,9 +16,8 @@ import Fy.Typing
 import Fy.Lowering
 import Fy.Emit
 
--- NEXT:
--- - Fix parsing
 -- TODO:
+-- - Deal with non-function bindings
 -- - Type parameter usage (for types)
 -- - Source locations
 -- - Error context

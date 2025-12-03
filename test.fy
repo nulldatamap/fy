@@ -29,7 +29,7 @@ Test
 . x = $$add ($$add 1 1) ($$add 2 3)
 . y = $$add x w
 . w = (q . q = 3)
--- . k x = ($$add (f x) 1 . f x = $$add 0 x)
+. k x = ($$add (f x) 1 . f x = $$add 0 x)
 . xy = Pos/Pos 2 3
 . truth = MyBool/True
 

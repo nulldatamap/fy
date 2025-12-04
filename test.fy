@@ -1,6 +1,6 @@
 -- Test program:
 Test
--> CInt64, Pos, Opt, Bar, Foo
+-> double, main, cool, truth
 <- Data/List = L
 <- Data/Maybe = M
 <- Data/Maybe/Maybe/*

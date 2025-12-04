@@ -86,14 +86,14 @@ registerFun f =
   modify (\s -> s { lstKnownFuncs = M.insert (fName f) f (lstKnownFuncs s) } )
 
 lowerBinding :: TBinding -> Lowering ()
-lowerBinding l@(Binding t x _ (Val e)) = do
+lowerBinding l@(Binding t x _ _ (Val e)) = do
   e' <- lowerExpr e
   case t of
     MonoType t0 -> do
       t0' <- lowerType t0
       irDef t0' x (Just e')
     _ -> error $ "Can't lower a polytype local: " ++ (show l)
-lowerBinding (Binding _ _ _ (Fun f)) = registerFun f
+lowerBinding (Binding { bBody = Fun f }) = registerFun f
 
 stmts :: Lowering a -> Lowering (a, [IRStmt])
 stmts m = censor (const []) $ listen m
@@ -294,6 +294,7 @@ lowerFunction f = do
   argsTs <- mapM (\(x, t) -> ((,) x) <$> (lowerType t)) $ args
   retT' <- lowerType retT
   let f' = IRFunc { irfName  = fName f
+                  , irfPub   = fPub f
                   , irfRetTy = retT'
                   , irfArgs  = argsTs
                   , irfBody  = body }
@@ -324,14 +325,14 @@ lowerVals :: [TBinding] -> Lowering ([IRVarDecl], [IRStmt])
 lowerVals bs = stmts $
   mapM (\b ->
           case b of
-           (Binding t x _ (Val e)) -> do
+           (Binding t x p _ (Val e)) -> do
              let t0 = case t of
                         MonoType mt -> mt
                         _ -> error $ "Polymorphic values are not support yet: " ++ (show x) ++ " : " ++ (show t)
              e' <- lowerExpr e
              t0' <- lowerType t0
              tell [ IRSet x e' ]
-             return $ IRVarDecl x t0'
+             return $ IRVarDecl x p t0'
            _ -> error $ "Function binding passed to lowerVals: " ++ (show b))
     bs
 
@@ -342,7 +343,7 @@ lowerModule m = do
   modify (\s -> s { lstKnownTypes =  M.union (lstKnownTypes s) tds })
   let (vals, funs) = partitionWith (\b ->
                                       case b of
-                                        Binding _ _ _ (Fun f) -> Right f
+                                        Binding { bBody = (Fun f) } -> Right f
                                         _ -> Left b)
                          (mItems m)
   mapM_ registerFun funs

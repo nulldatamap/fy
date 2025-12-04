@@ -8,9 +8,9 @@ import Fy.Ast
 
 import Prelude hiding (lookup, lines)
 import qualified Data.Set as S
-import Data.List (elemIndex)
+import Data.List (elemIndex, unsnoc)
 import Data.Set (Set)
-import Control.Monad (when, foldM)
+import Control.Monad (when, unless, foldM)
 import Control.Monad.State
 import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
@@ -27,17 +27,19 @@ data NameEntry = NameEntry { neName  :: Ident
 type NameMap = M.HashMap Ident NameEntry
 type TypeDefMap = M.HashMap Ident (Maybe TypeBody)
 
-data NamingSt = NamingSt { nstNext   :: Int
-                         , nstDepth  :: Int
-                         , nstDeps   :: Set Ident
-                         , nstTypes  :: TypeDefMap
-                         , nstScope  :: NameMap }
+data NamingSt = NamingSt { nstNext    :: Int
+                         , nstDepth   :: Int
+                         , nstDeps    :: Set Ident
+                         , nstTypes   :: TypeDefMap
+                         , nstExports :: Set Ident
+                         , nstScope   :: NameMap }
 
 data NamingError = UndefinedName Ident
                  | UndefinedType Ident
                  | InvalidCapture Ident
                  | DuplicateNames [Ident]
                  | InvalidPattern UPat
+                 | UnresolvedExports [Ident]
   deriving Show
 
 type Naming = StateT NamingSt (Except NamingError)
@@ -71,6 +73,7 @@ runNaming gs n = runExcept (evalStateT n st)
     st = NamingSt { nstNext = 0
                   , nstScope = gs
                   , nstDepth = 0
+                  , nstExports = S.empty
                   , nstDeps = S.empty
                   , nstTypes = M.empty }
 
@@ -107,9 +110,19 @@ checkBindings :: [UBinding] -> Naming [UBinding]
 checkBindings ls = do
   scopedVars (map bName ls) $ mapM checkBinding ls
 
+checkExported :: Ident -> Naming Publicity
+checkExported x = do
+  exports <- nstExports <$> get
+  if x `S.member` exports
+  then do
+    modify (\s -> s { nstExports = S.delete x exports })
+    return $ Public
+  else return Private
+
 checkBinding :: UBinding -> Naming (Binding ())
-checkBinding (Binding t x _ (Val e)) = do
+checkBinding (Binding t x _ _ (Val e)) = do
   (NameEntry x' _) <- lookup x
+  p <- checkExported x
   -- checkFunction always increments the depth, but the value equivalent
   -- Does not (because we don't want to increase the depth through let-bindings)
   -- But specifically in the case of top-level value bindings we need to increase
@@ -118,11 +131,12 @@ checkBinding (Binding t x _ (Val e)) = do
   modify (\s -> s { nstDepth = d + 1 })
   (e', deps) <- block $ checkExpr e
   modify (\s -> s { nstDepth = d })
-  return $ Binding t x' deps (Val e')
-checkBinding (Binding t x _ (Fun f)) = do
+  return $ Binding t x' p deps (Val e')
+checkBinding (Binding t x _ _ (Fun f)) = do
    (NameEntry x' _) <- lookup x
-   f' <- checkFunction x' (map fst $ fArgs f) (fBody f)
-   return $ Binding t x' (fDeps f') (Fun f')
+   p <- checkExported x
+   f' <- checkFunction x' (map fst $ fArgs f) p (fBody f)
+   return $ Binding t x' p (fDeps f') (Fun f')
 
 checkPat :: UPat -> Naming (UPat, [(Ident, Ident)])
 checkPat p = do
@@ -189,13 +203,13 @@ checkExpr e =
       return $ ECase () e0' cs'
     _ -> return e
 
-checkFunction :: Ident -> [Ident] -> UExpr -> Naming UFunction
-checkFunction f xs e = do
+checkFunction :: Ident -> [Ident] -> Publicity -> UExpr -> Naming UFunction
+checkFunction f xs p e = do
   oldDepth <- nstDepth <$> get
   modify (\s -> s { nstDepth = oldDepth + 1 })
   (xs', (body, deps)) <- scopedVars' xs $ block (checkExpr e)
   modify (\s -> s { nstDepth = oldDepth })
-  return $ Function f (MonoType ()) (map (\x -> (x, ())) xs') deps body
+  return $ Function f (MonoType ()) (map (\x -> (x, ())) xs') p deps body
 
 checkType :: [Ident] -> Type -> Naming Type
 checkType _ (TVar _) = error "Parametric types are not supported yet"
@@ -239,10 +253,21 @@ checkTypeDefs tds = do
   where
     builtins = M.fromList $ map (\x -> (mkId x, Nothing)) ["int", "()"]
 
+registerExport :: PathItem -> Naming ()
+registerExport (PathItem ps Nothing Nothing) =
+  let (ns, n) = case unsnoc ps of
+                  Nothing -> error $ "Empty path item??"
+                  Just x -> x
+  in modify (\s -> s { nstExports = S.insert (Ident n ns Nothing) $ nstExports s })
+registerExport pi = error $ "Unsupported export: " ++ (show pi)
+
 checkModule :: UModule -> Naming UModule
 checkModule m = do
+  mapM_ registerExport $ mExports m
   tds' <- checkTypeDefs $ mTypeDefs m
   is <- checkBindings $ mItems m
+  exs <- nstExports <$> get
+  unless (null exs) $ throwError $ UnresolvedExports $ S.toList exs
   return m { mTypeDefs = tds', mItems = is }
 
 namingCheck :: UModule -> Either NamingError UModule

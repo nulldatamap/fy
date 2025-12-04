@@ -3,7 +3,7 @@ module Fy.Ast
   , Program(..), Builtin(..), ValOrFun(..)
   , Binding(..), Function(..), Lit(..)
   , Case(..), Expr(..), Pat(..)
-  , Module(..), PathItem(..)
+  , Module(..), PathItem(..), Publicity(..)
   , UModule, UProgram, UPat, UCase, UExpr, UFunction, UBinding
   , TModule, TProgram, TPat, TCase, TExpr, TFunction, TBinding
   , isFun
@@ -16,6 +16,10 @@ import Prelude hiding (lookup, lines)
 import Data.Text (Text)
 import Data.Set (Set)
 
+data Publicity = Private
+               | Public
+               | CExport Text
+               deriving (Show, Eq)
 
 data PathItem = PathItem { piPath  :: [Text]
                          , piHead  :: Maybe (Maybe [Ident])
@@ -53,6 +57,7 @@ data ValOrFun t = Val (Expr t) | Fun (Function t)
 
 data Binding t = Binding { bType :: TypeSchemeT t
                          , bName :: Ident
+                         , bPub  :: Publicity
                          , bDeps :: Set Ident
                          , bBody :: ValOrFun t }
   deriving (Show, Foldable, Functor)
@@ -60,6 +65,7 @@ data Binding t = Binding { bType :: TypeSchemeT t
 data Function t = Function { fName   :: Ident
                            , fType   :: TypeSchemeT t
                            , fArgs   :: [(Ident, t)]
+                           , fPub    :: Publicity
                            , fDeps   :: Set Ident
                            , fBody   :: Expr t }
   deriving (Show, Foldable, Functor)

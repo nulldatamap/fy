@@ -2,7 +2,7 @@ module Fy.Ir
   ( Operator(..)
   , IRType(..), IRTypeDef(..), IRRecord(..), IRVarDecl(..)
   , IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
-  , IRProgram(..)
+  , IRProgram(..), Publicity(..)
   , typeDefName, irtUnit
   ) where
 
@@ -10,6 +10,7 @@ module Fy.Ir
 import Data.Text (Text)
 
 import Fy.Types
+import Fy.Ast (Publicity(..))
 
 data Operator = OpAdd
               | OpEq
@@ -50,12 +51,14 @@ data IRStmt = IRDef IRType Ident (Maybe IRExpr)
             deriving (Show)
 
 data IRFunc = IRFunc { irfName  :: Ident
+                     , irfPub   :: Publicity
                      , irfRetTy :: IRType
                      , irfArgs  :: [(Ident, IRType)]
                      , irfBody  :: [IRStmt] }
             deriving (Show)
 
 data IRVarDecl = IRVarDecl { irvdName :: Ident
+                           , irvPub   :: Publicity
                            , irvdType :: IRType }
             deriving (Show)
 

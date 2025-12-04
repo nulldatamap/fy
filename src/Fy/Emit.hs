@@ -86,11 +86,22 @@ emitProgram p = runEmitter $ do
           , "  return 0;" ]
   line "\n"
 
+emitItemExport :: Publicity -> Ident -> Emitter Ident
+emitItemExport Private x = (emit "static ") >> (return x)
+emitItemExport Public x = return x
+emitItemExport (CExport cName) x = do
+  emit "#define "
+  emitIdent x
+  emit " "
+  line cName
+  return $ mkId cName
+
 emitVarDecl :: IRVarDecl -> Emitter ()
-emitVarDecl (IRVarDecl x t) = do
+emitVarDecl (IRVarDecl x p t) = do
+  x' <- emitItemExport p x
   emitType t
   emit " "
-  emitIdent x
+  emitIdent x'
   line ";"
 
 emitModuleInitializer :: Ident -> [IRStmt] -> Emitter ()
@@ -120,9 +131,10 @@ emitTypeDefs tds = do
 emitFunction  :: IRFunc -> Emitter ()
 emitFunction f = do
     indent
+    fn' <- emitItemExport (irfPub f) (irfName f)
     emitType $ irfRetTy f
     emit " "
-    emitIdent $ irfName f
+    emitIdent fn'
     parens $ do
       seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) $ irfArgs f
     emit " "

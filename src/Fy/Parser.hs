@@ -147,9 +147,9 @@ pBinding = do
   body <- symbol "=" *> pCaseExpr
   return $
     if null args
-    then Binding (MonoType ()) x (S.empty) $ Val body
-    else Binding (MonoType ()) x (S.empty) $
-           Fun $ Function x (MonoType ()) (zip args $ repeat ()) (S.empty) body
+    then Binding (MonoType ()) x Private (S.empty) $ Val body
+    else Binding (MonoType ()) x Private (S.empty) $
+           Fun $ Function x (MonoType ()) (zip args $ repeat ()) Private (S.empty) body
 
 pPat' :: Parser UPat
 pPat' =  (symbol "_" *> (return $ PHole ()))

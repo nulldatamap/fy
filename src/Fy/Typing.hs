@@ -135,10 +135,11 @@ inferFunction f = do
   fty <- realize $ TFun prmTys retTy
   fty' <- generalize fty
   realize $ Function { fName = fName f
-                    , fType = fty'
-                    , fArgs = zip (map fst $ fArgs f) prmTys
-                    , fDeps   = fDeps f
-                    , fBody   = e' }
+                     , fType = fty'
+                     , fArgs = zip (map fst $ fArgs f) prmTys
+                     , fPub  = fPub f
+                     , fDeps = fDeps f
+                     , fBody = e' }
 
 inferBindings :: [UBinding] -> ([TBinding] -> Typing a) -> Typing a
 inferBindings ls innerF =
@@ -158,7 +159,7 @@ inferWithSccBindings ((AcyclicSCC l):ls) innerF ls' = do
       Fun f  -> do
         f' <- inferFunction f
         return (Fun f', fType f')
-  scoped [(bName l, t')] $ inferWithSccBindings ls innerF ((Binding t' (bName l) (bDeps l) vof):ls')
+  scoped [(bName l, t')] $ inferWithSccBindings ls innerF ((l { bType = t', bBody = vof }):ls')
 
 typeOfName :: Ident -> Typing Type
 typeOfName x = lookup x >>= instanciate

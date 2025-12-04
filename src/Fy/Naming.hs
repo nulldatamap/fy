@@ -223,8 +223,13 @@ checkType ps (TCons x ts) = do
 checkType ps (TFun ts t) = TFun <$> (mapM (checkType ps) ts) <*> (checkType ps t)
 
 checkTypeDef :: TypeDef -> Naming TypeDef
-checkTypeDef td@(TypeDef _ _ (TBCType _)) = return td
-checkTypeDef (TypeDef tn tPrms (TBConses cs)) = do
+checkTypeDef td = do
+  _ <- checkExported (tdName td)
+  checkTypeDef' td
+
+checkTypeDef' :: TypeDef -> Naming TypeDef
+checkTypeDef' td@(TypeDef _ _ (TBCType _)) = return td
+checkTypeDef' (TypeDef tn tPrms (TBConses cs)) = do
   cs' <- mapM checkAndIntroCons cs
   return $ TypeDef tn (take (length tPrms) $ map TVar [0 :: Int ..]) (TBConses cs')
   where
@@ -259,7 +264,7 @@ registerExport (PathItem ps Nothing Nothing) =
                   Nothing -> error $ "Empty path item??"
                   Just x -> x
   in modify (\s -> s { nstExports = S.insert (Ident n ns Nothing) $ nstExports s })
-registerExport pi = error $ "Unsupported export: " ++ (show pi)
+registerExport p = error $ "Unsupported export: " ++ (show p)
 
 checkModule :: UModule -> Naming UModule
 checkModule m = do

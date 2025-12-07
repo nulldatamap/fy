@@ -283,8 +283,16 @@ emitTypeDef (IRTaggedType t rs) = do
   emit " "
   emitIdent t
   line ";\n"
+emitTypeDef (IRFunType t rt ts) = do
+  emit "typedef "
+  emitType rt
+  emit " "
+  parens $ emit "*" >> emitIdent t
+  parens $ seperated ", " emitType ts
+  line ";"
 
 emitConses :: IRTypeDef -> Emitter ()
+emitConses (IRFunType _ _ _) = return ()
 emitConses (IRCType _ _) = return ()
 emitConses (IREnumType _ variants) = do
   mapM_ (\v -> do

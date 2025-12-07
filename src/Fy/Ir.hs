@@ -27,6 +27,7 @@ data IRTypeDef = IREnumType Ident [Ident]
                | IRStructType Ident IRRecord
                | IRTaggedType Ident [IRRecord]
                | IRCType Ident Text
+               | IRFunType Ident IRType [IRType]
                deriving Show
 
 data IRLit = IRInt Integer
@@ -77,3 +78,4 @@ typeDefName (IREnumType n _) = n
 typeDefName (IRStructType n _) = n
 typeDefName (IRTaggedType n _) = n
 typeDefName (IRCType n _) = n
+typeDefName (IRFunType n _ _) = n

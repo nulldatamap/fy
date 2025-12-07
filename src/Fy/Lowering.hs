@@ -118,8 +118,14 @@ lowerExpr e =
       ECons t x -> do
         t' <- lowerType t
         return $ IRCons t' x []
-      ELocal _ x -> return $ IRVar x
-      EGlobal _ x -> return $ IRVar x
+      ELocal t x -> do
+        if isFnTy t
+        then IRVar <$> (tryInstanciateFunc x t)
+        else return $ IRVar x
+      EGlobal t x -> do
+        if isFnTy t
+        then IRVar <$> (instanciateFunc x t)
+        else return $ IRVar x
       EIdent _ _ -> error $ "EIdent found during lowering: " ++ (show e)
       EApp t (ECons _ x) xs -> do
         xs' <- mapM lowerExpr xs
@@ -136,8 +142,7 @@ lowerExpr e =
         xs' <- filterVoids <$> mapM lowerExpr xs
         case f' of
           IRVar fx -> do
-            fx' <- instanciateFunc fx (typeOf f)
-            return $ IRCall fx' xs'
+            return $ IRCall fx xs'
           _ -> error $ "Lowering non-direct calls are not supported yet: " ++ (show e)
       ELet _ ls e0 -> do
         mapM_ lowerBinding ls
@@ -169,7 +174,16 @@ lowerExpr e =
 
 lookupTypeDef :: Type -> Lowering IRTypeDef
 lookupTypeDef t@(TVar _) = error $ "Type variable during lowering: " ++ (show t)
-lookupTypeDef t@(TFun _ _) = error $ "Tried to lookup a function type: " ++ (show t)
+lookupTypeDef t@(TFun ts rt) = do
+  tis <- lstTypeInsts <$> get
+  case M.lookup t tis of
+    Nothing -> do
+      ts' <- mapM lowerType $ filter (/= tUnit) ts
+      rt' <- lowerType rt
+      let td = IRFunType (mkId $ encodeType $ MonoType t) rt' ts'
+      modify (\s -> s { lstTypeInsts = M.insert t td $ lstTypeInsts s })
+      return td
+    Just td -> return td
 lookupTypeDef t@(TCons c ts) = do
   tis <- lstTypeInsts <$> get
   case M.lookup t tis of
@@ -192,6 +206,7 @@ lowerType t = do
   return $ IRType $ typeDefName td
 
 instanciateType :: [Type] -> TypeDef -> Lowering IRTypeDef
+instanciateType [] td = lowerTypeDef td
 instanciateType ts td@(TypeDef tn _ _) = do
   let ss = Subst $ M.fromList $ zip [0 :: Int ..] ts
   let td' = subst ss td
@@ -207,6 +222,8 @@ lowerPattern (PBinding t x) path bs = do
 lowerPattern (PCons t c ps) path bs = do
   td <- lookupTypeDef t
   case td of
+    IRFunType _ _ _ -> error $ "Tried to match a function pointer type with a constructor? "
+                         ++ (show c) ++ " : " ++ (show t)
     IRCType _ _ -> error $ "Tried to match a ctype with a constructor? " ++ (show c) ++ " : " ++ (show t)
     IREnumType tn _ -> return ([IROp OpEq [path, IRCons (IRType tn) c []]], bs)
     IRStructType _ (IRRecord _ fs) -> lowerRecordPattern ps bs path fs
@@ -253,21 +270,35 @@ lowerBody b = do
 
 instanciateFunc :: Ident -> Type -> Lowering Ident
 instanciateFunc fx ft = do
+  mx <- instanciateFunc' fx ft
+  case mx of
+    Nothing -> error $ "Tried to instanciate unknown function: " ++ (show fx)
+    Just x -> return x
+
+tryInstanciateFunc :: Ident -> Type -> Lowering Ident
+tryInstanciateFunc fx ft = do
+  mx <- instanciateFunc' fx ft
+  case mx of
+    Nothing -> return fx
+    Just x -> return x
+
+instanciateFunc' :: Ident -> Type -> Lowering (Maybe Ident)
+instanciateFunc' fx ft = do
   when (isNothing $ unFn ft) $ do
     error $ "Non-function type as function head: " ++ (show fx) ++ " : " ++ (show ft)
   st <- get
   case M.lookup (fx, ft) (lstFuncInsts st) of
-    Just f -> return $ irfName f
+    Just f -> return $ Just $ irfName f
     Nothing -> do
         case M.lookup fx (lstKnownFuncs st) of
-          Nothing -> error $ "Tried to instanciate unknown function: " ++ (show fx)
+          Nothing -> return Nothing
           Just f ->
             case fType f of
               MonoType _ -> do
                 f' <- lowerFunction f
                 let fx' = irfName f'
                 modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f' (lstFuncInsts s) })
-                return fx'
+                return $ Just fx'
               PolyType _ rft -> do
                 let mF' = runTyping $ do
                             unify rft ft
@@ -280,7 +311,7 @@ instanciateFunc fx ft = do
                     let fx' = (fName f') `suffixId` (T.append "_" $ encodeType $ MonoType ft)
                     f'' <- lowerFunction $ f' { fName = fx' }
                     modify (\s -> s { lstFuncInsts = M.insert (fx', ft) f'' (lstFuncInsts s) })
-                    return fx'
+                    return $ Just fx'
 
 lowerFunction :: TFunction -> Lowering IRFunc
 lowerFunction f = do

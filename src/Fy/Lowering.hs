@@ -12,6 +12,7 @@ import Fy.Typing
 import Prelude hiding (lookup, lines)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Set (Set)
 import qualified Data.Set as S
 import Data.List (intersperse, find, elemIndex)
 import Data.Maybe
@@ -19,6 +20,7 @@ import Control.Monad
 import Control.Monad.State
 import Control.Monad.RWS
 import qualified Data.HashMap.Strict as M
+import Data.Graph (stronglyConnComp, SCC(..))
 
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
@@ -372,7 +374,37 @@ lowerVals bs = stmts $
            _ -> error $ "Function binding passed to lowerVals: " ++ (show b))
     bs
 
+annotateType :: Set Ident -> IRTypeDef -> IRTypeDef
+annotateType recGroup (IRTypeDef tn _ _ body) =
+  IRTypeDef tn recGroup isBoxed body
+  where
+    isBoxed =
+      if S.null recGroup
+      then
+        case body of
+          -- TODO: Add a heuristic for when not to box structs and tagged types
+          IRStructType _ -> True
+          IRTaggedType _ -> True
+          _ -> False
+      else True
 
+
+orderAndAnnotateTypes :: [IRTypeDef] -> Lowering [IRTypeDef]
+orderAndAnnotateTypes tds = do
+  concat <$> mapM (\scc ->
+          case scc of
+            NECyclicSCC xs -> error $ "Recursive types are not supported yet: " ++ (show xs)
+            AcyclicSCC td -> return [annotateType S.empty td])
+    (stronglyConnComp $ map typeDepGraph tds)
+  where
+    typeDepGraph td@(IRTypeDef tn _ _ (IRStructType r)) = (td, tn, recordDeps r)
+    typeDepGraph td@(IRTypeDef tn _ _ (IRTaggedType rs)) = (td, tn, concat $ map recordDeps rs)
+    typeDepGraph td = (td, irtdName td, [])
+    recordDeps (IRRecord _ fs) = map (\(IRType tn, _) -> tn) fs
+
+-- TODO: We should probably split up lowering into two phases:
+-- - 1: Instanciate all functions and types
+-- - 2: Then lower the concrete stuff, that way we can deal properly with boxing
 lowerModule :: TModule -> Lowering IRProgram
 lowerModule m = do
   let tds = M.fromList $ map (\t@(TypeDef tn _ _) -> (tn, t)) $ mTypeDefs m
@@ -387,8 +419,9 @@ lowerModule m = do
   _ <- instanciateFunc (mkId "main") (TFun [tUnit] tUnit)
   fs <- lstFuncs <$> get
   tyInsts <- lstTypeInsts <$> get
+  tds' <- orderAndAnnotateTypes $ M.elems tyInsts
   return $ IRProgram { irpName  = mName m
-                     , irpTypes = M.elems tyInsts
+                     , irpTypes = tds'
                      , irpFuncs = reverse fs
                      , irpVars  = vs
                      , irpInit  = inits }

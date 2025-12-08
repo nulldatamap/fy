@@ -8,27 +8,27 @@ import Fy.Ir
 
 import Prelude hiding (lookup, lines)
 import Data.Text (Text)
+import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
 import Data.List (intersperse)
 import Control.Monad (when)
 import Control.Monad.RWS
 
-import Data.Graph (stronglyConnComp, SCC(..))
+data EmitterSt = EmitterSt { estIndentation :: Int
+                           , estTypes :: M.HashMap Ident IRTypeDef }
 
-type Identation = Int
-
-type Emitter a = RWS Identation [Text] () a
+type Emitter a = RWS EmitterSt [Text] () a
 
 
 runEmitter :: Emitter () -> Text
-runEmitter m = T.concat $ snd $ evalRWS m 0 ()
+runEmitter m = T.concat $ snd $ evalRWS m (EmitterSt 0 M.empty) ()
 
 indented :: Emitter a -> Emitter a
-indented m = local (+1) m
+indented m = local (\st -> st { estIndentation = 1 + estIndentation st }) m
 
 indent :: Emitter ()
 indent = do
-  d <- ask
+  d <- estIndentation <$> ask
   emit $ T.replicate d "  "
 
 line :: Text -> Emitter ()
@@ -65,12 +65,17 @@ braceBlock m = do
   emit "}"
   return r
 
+withTypes :: [IRTypeDef] -> Emitter a -> Emitter a
+withTypes tds m =
+  local (\s -> s { estTypes = M.fromList $ map (\td -> (irtdName td, td)) tds }) m
+
 emitProgram :: IRProgram -> Text
-emitProgram p = runEmitter $ do
+emitProgram p = runEmitter $ withTypes (irpTypes p) $ do
   lines [ "#include <stdio.h>"
         , "#include <stdbool.h>"
         , "#include <stdlib.h>"
         , ""
+        , "void* __fy_alloc(size_t sz) { return malloc(sz); }"
         ]
   emitTypeDefs $ irpTypes p
   mapM_ emitVarDecl $ irpVars p
@@ -114,19 +119,11 @@ emitModuleInitializer n sts = do
   line ""
 
 emitTypeDefs :: [IRTypeDef] -> Emitter ()
-emitTypeDefs tds = do
-  mapM_ (\scc ->
-          case scc of
-            NECyclicSCC xs -> error $ "Recursive types are not supported yet: " ++ (show xs)
-            AcyclicSCC td -> do
-              emitTypeDef td
-              emitConses td)
-    (stronglyConnComp $ map typeDepGraph tds)
-  where
-    typeDepGraph td@(IRTypeDef tn _ _ (IRStructType r)) = (td, tn, recordDeps r)
-    typeDepGraph td@(IRTypeDef tn _ _ (IRTaggedType rs)) = (td, tn, concat $ map recordDeps rs)
-    typeDepGraph td = (td, irtdName td, [])
-    recordDeps (IRRecord _ fs) = map (\(IRType tn, _) -> tn) fs
+emitTypeDefs tds =
+  mapM_ (\td -> do
+            emitTypeDef td
+            emitConses td)
+    tds
 
 emitFunction  :: IRFunc -> Emitter ()
 emitFunction f = do
@@ -176,6 +173,13 @@ chainedOp True _ _ [x] = emitExpr (x)
 chainedOp False op _ [x] = error $ "Can't use chained op `" ++ (show op) ++ "` with only one argument: " ++ (show x)
 chainedOp _ op _ xs = seperated op emitExpr xs
 
+isTypeBoxed :: IRType -> Emitter Bool
+isTypeBoxed (IRType tn) = do
+  tys <- estTypes <$> ask
+  case M.lookup tn tys of
+    Nothing -> error $ "Unreolved type: " ++ (show tn)
+    Just t -> return $ irtdIsBoxed t
+
 emitExpr :: IRExpr -> Emitter ()
 emitExpr (IRVar x) = emitIdent x
 emitExpr (IRLit l) =
@@ -188,10 +192,13 @@ emitExpr (IROp o [x, y]) =
     case o of
         OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
-emitExpr (IRCons _ x es) = do
-  emit "MK_"
-  emitIdent' x
-  parens $ seperated ", " emitExpr es
+emitExpr (IRCons t x es) = do
+  isBoxed <- isTypeBoxed t
+  let go = if isBoxed then (\m -> emit "BOX" >> (parens m)) else id
+  go $ do
+    emit "MK_"
+    emitIdent' x
+    parens $ seperated ", " emitExpr es
 emitExpr (IRCall x es) = do
   emitIdent x
   parens $ seperated ", " emitExpr es
@@ -232,8 +239,8 @@ emitEnum t isVariant vs = do
     emitIdent t
     when isVariant $ emit "__variant"
     line ";\n"
-emitStruct' :: Bool -> Ident -> IRRecord -> Emitter ()
-emitStruct' isField n (IRRecord _ fs) = do
+emitStruct' :: Bool -> Ident -> IRRecord -> Bool -> Emitter ()
+emitStruct' isField n (IRRecord _ fs) isBoxed = do
   indent
   emit "struct "
   braceBlock $ do
@@ -245,26 +252,28 @@ emitStruct' isField n (IRRecord _ fs) = do
               line ";")
         fs
   emit " "
+  when isBoxed $ emit "*"
   if isField
   then emitIdent' n
   else emitIdent n
   line ";"
 
-emitStruct :: Ident -> IRRecord -> Emitter ()
-emitStruct n r = emitStruct' False n r
+emitStruct :: Ident -> IRRecord -> Bool -> Emitter ()
+emitStruct n r isBoxed = emitStruct' False n r isBoxed
 
 emitTypeDef :: IRTypeDef -> Emitter ()
-emitTypeDef (IRTypeDef t _ _ b) =
+emitTypeDef (IRTypeDef t _ isBoxed b) = do
   case b of
     IRCType ct -> do
       emit "typedef "
       emit ct
+      when isBoxed $ emit "*"
       emit " "
       emitIdent t
       line ";\n"
     IRStructType r -> do
       emit "typedef "
-      emitStruct t r
+      emitStruct t r isBoxed
       line ""
     IREnumType variants -> emitEnum t False variants
     IRTaggedType rs -> do
@@ -280,8 +289,9 @@ emitTypeDef (IRTypeDef t _ _ b) =
         indent
         emit "union "
         braceBlock $
-          mapM_ (\r@(IRRecord c _) -> emitStruct' True c r) rs
+          mapM_ (\r@(IRRecord c _) -> emitStruct' True c r False) rs
         line ";"
+      when isBoxed $ emit "*"
       emit " "
       emitIdent t
       line ";\n"

@@ -12,6 +12,7 @@ import Fy.Typing
 import Prelude hiding (lookup, lines)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Set as S
 import Data.List (intersperse, find, elemIndex)
 import Data.Maybe
 import Control.Monad
@@ -180,7 +181,7 @@ lookupTypeDef t@(TFun ts rt) = do
     Nothing -> do
       ts' <- mapM lowerType $ filter (/= tUnit) ts
       rt' <- lowerType rt
-      let td = IRFunType (mkId $ encodeType $ MonoType t) rt' ts'
+      let td = mkTypeDef (mkId $ encodeType $ MonoType t) $ IRFunType rt' ts'
       modify (\s -> s { lstTypeInsts = M.insert t td $ lstTypeInsts s })
       return td
     Just td -> return td
@@ -203,7 +204,7 @@ lowerType (TCons x@(Ident "bool" [] Nothing) []) = return $ IRType x
 lowerType (TCons x@(Ident "()" [] Nothing) []) = return $ IRType x
 lowerType t = do
   td <- lookupTypeDef t
-  return $ IRType $ typeDefName td
+  return $ IRType $ irtdName td
 
 instanciateType :: [Type] -> TypeDef -> Lowering IRTypeDef
 instanciateType [] td = lowerTypeDef td
@@ -221,13 +222,14 @@ lowerPattern (PBinding t x) path bs = do
   return ([], bs ++ [IRDef t' x $ Just path])
 lowerPattern (PCons t c ps) path bs = do
   td <- lookupTypeDef t
-  case td of
-    IRFunType _ _ _ -> error $ "Tried to match a function pointer type with a constructor? "
+  let tn = irtdName td
+  case irtdBody td of
+    IRFunType _ _ -> error $ "Tried to match a function pointer type with a constructor? "
                          ++ (show c) ++ " : " ++ (show t)
-    IRCType _ _ -> error $ "Tried to match a ctype with a constructor? " ++ (show c) ++ " : " ++ (show t)
-    IREnumType tn _ -> return ([IROp OpEq [path, IRCons (IRType tn) c []]], bs)
-    IRStructType _ (IRRecord _ fs) -> lowerRecordPattern ps bs path fs
-    IRTaggedType tn rs -> do
+    IRCType _ -> error $ "Tried to match a ctype with a constructor? " ++ (show c) ++ " : " ++ (show t)
+    IREnumType _ -> return ([IROp OpEq [path, IRCons (IRType tn) c []]], bs)
+    IRStructType (IRRecord _ fs) -> lowerRecordPattern ps bs path fs
+    IRTaggedType rs -> do
       case find (\(IRRecord c0 _) -> c == c0) rs of
         Nothing -> error $ "Couldn't find constructor `" ++ (show c) ++ "` in type: " ++ (show t)
         Just (IRRecord _ fs) -> do
@@ -332,22 +334,25 @@ lowerFunction f = do
   modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
   return f'
 
+mkTypeDef :: Ident -> IRTypeBody -> IRTypeDef
+mkTypeDef n b = IRTypeDef n S.empty False b
+
 lowerTypeDef :: TypeDef -> Lowering IRTypeDef
-lowerTypeDef (TypeDef n _ (TBCType ct)) = return $ IRCType n ct
+lowerTypeDef (TypeDef n _ (TBCType ct)) = return $ mkTypeDef n $ IRCType ct
 lowerTypeDef (TypeDef _ _ (TBConses [])) = error $ "Zero types are not supported yet"
 lowerTypeDef (TypeDef n _ (TBConses [(TypeCons c ts)])) = do
   ts' <- mapM lowerType ts
   let r = IRRecord c $ zip ts' unnamedFields
-  return $ IRStructType n r
+  return $ mkTypeDef n $ IRStructType r
 lowerTypeDef (TypeDef n _ (TBConses cs)) = do
   if allTags
-  then return $ IREnumType n $ reverse variants
+  then return $ mkTypeDef n $ IREnumType $ reverse variants
   else do
     rs <- mapM (\(TypeCons c ts) -> do
                     ts' <- mapM lowerType ts
                     return $ IRRecord c $ zip ts' unnamedFields)
            cs
-    return $ IRTaggedType n rs
+    return $ mkTypeDef n $ IRTaggedType rs
   where
     (allTags, variants) =
       foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), v : vs)) (True, []) cs

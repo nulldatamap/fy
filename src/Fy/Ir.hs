@@ -1,13 +1,14 @@
 module Fy.Ir
   ( Operator(..)
-  , IRType(..), IRTypeDef(..), IRRecord(..), IRVarDecl(..)
-  , IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
+  , IRType(..), IRTypeDef(..), IRRecord(..), IRTypeBody(..)
+  , IRVarDecl(..), IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
   , IRProgram(..), Publicity(..)
-  , typeDefName, irtUnit
+  , irtUnit
   ) where
 
 
 import Data.Text (Text)
+import Data.Set (Set)
 
 import Fy.Types
 import Fy.Ast (Publicity(..))
@@ -23,12 +24,19 @@ data IRType = IRType Ident
 data IRRecord = IRRecord Ident [(IRType, Ident)]
   deriving (Show)
 
-data IRTypeDef = IREnumType Ident [Ident]
-               | IRStructType Ident IRRecord
-               | IRTaggedType Ident [IRRecord]
-               | IRCType Ident Text
-               | IRFunType Ident IRType [IRType]
-               deriving Show
+data IRTypeBody = IREnumType [Ident]
+                | IRStructType IRRecord
+                | IRTaggedType [IRRecord]
+                | IRCType Text
+                | IRFunType IRType [IRType]
+                deriving Show
+
+data IRTypeDef = IRTypeDef { irtdName :: Ident
+                           , irtdRecursionGroup :: Set Ident
+                           , irtdIsBoxed :: Bool
+                           , irtdBody :: IRTypeBody }
+  deriving Show
+
 
 data IRLit = IRInt Integer
            | IRVoid
@@ -72,10 +80,3 @@ data IRProgram = IRProgram { irpName  :: Ident
 
 irtUnit :: IRType
 irtUnit = IRType (Ident "()" [] Nothing)
-
-typeDefName :: IRTypeDef -> Ident
-typeDefName (IREnumType n _) = n
-typeDefName (IRStructType n _) = n
-typeDefName (IRTaggedType n _) = n
-typeDefName (IRCType n _) = n
-typeDefName (IRFunType n _ _) = n

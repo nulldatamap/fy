@@ -123,9 +123,9 @@ emitTypeDefs tds = do
               emitConses td)
     (stronglyConnComp $ map typeDepGraph tds)
   where
-    typeDepGraph td@(IRStructType tn r) = (td, tn, recordDeps r)
-    typeDepGraph td@(IRTaggedType tn rs) = (td, tn, concat $ map recordDeps rs)
-    typeDepGraph td = (td, typeDefName td, [])
+    typeDepGraph td@(IRTypeDef tn _ _ (IRStructType r)) = (td, tn, recordDeps r)
+    typeDepGraph td@(IRTypeDef tn _ _ (IRTaggedType rs)) = (td, tn, concat $ map recordDeps rs)
+    typeDepGraph td = (td, irtdName td, [])
     recordDeps (IRRecord _ fs) = map (\(IRType tn, _) -> tn) fs
 
 emitFunction  :: IRFunc -> Emitter ()
@@ -254,65 +254,69 @@ emitStruct :: Ident -> IRRecord -> Emitter ()
 emitStruct n r = emitStruct' False n r
 
 emitTypeDef :: IRTypeDef -> Emitter ()
-emitTypeDef (IRCType t ct) = do
-  emit "typedef "
-  emit ct
-  emit " "
-  emitIdent t
-  line ";\n"
-emitTypeDef (IRStructType t r) = do
-  emit "typedef "
-  emitStruct t r
-  line ""
-emitTypeDef (IREnumType t variants) = emitEnum t False variants
-emitTypeDef (IRTaggedType t rs) = do
-  emitEnum t True $ map (\(IRRecord v _) -> v) rs
-  indent
-  emit "typedef struct "
-  braceBlock $ do
-    indent
-    emitIdent t
-    emit "__variant "
-    emitIdent' variantField
-    line ";"
-    indent
-    emit "union "
-    braceBlock $
-      mapM_ (\r@(IRRecord c _) -> emitStruct' True c r) rs
-    line ";"
-  emit " "
-  emitIdent t
-  line ";\n"
-emitTypeDef (IRFunType t rt ts) = do
-  emit "typedef "
-  emitType rt
-  emit " "
-  parens $ emit "*" >> emitIdent t
-  parens $ seperated ", " emitType ts
-  line ";"
+emitTypeDef (IRTypeDef t _ _ b) =
+  case b of
+    IRCType ct -> do
+      emit "typedef "
+      emit ct
+      emit " "
+      emitIdent t
+      line ";\n"
+    IRStructType r -> do
+      emit "typedef "
+      emitStruct t r
+      line ""
+    IREnumType variants -> emitEnum t False variants
+    IRTaggedType rs -> do
+      emitEnum t True $ map (\(IRRecord v _) -> v) rs
+      indent
+      emit "typedef struct "
+      braceBlock $ do
+        indent
+        emitIdent t
+        emit "__variant "
+        emitIdent' variantField
+        line ";"
+        indent
+        emit "union "
+        braceBlock $
+          mapM_ (\r@(IRRecord c _) -> emitStruct' True c r) rs
+        line ";"
+      emit " "
+      emitIdent t
+      line ";\n"
+    IRFunType rt ts -> do
+      emit "typedef "
+      emitType rt
+      emit " "
+      parens $ emit "*" >> emitIdent t
+      parens $ seperated ", " emitType ts
+      line ";"
 
 emitConses :: IRTypeDef -> Emitter ()
-emitConses (IRFunType _ _ _) = return ()
-emitConses (IRCType _ _) = return ()
-emitConses (IREnumType _ variants) = do
-  mapM_ (\v -> do
-            emit "#define MK_"
-            emitIdent' v
-            emit "() "
-            emitIdent $ v
-            line "") variants
-  line ""
-emitConses (IRStructType t (IRRecord c fs)) = do
-  emit "#define MK_"
-  emitIdent' c
-  let args = take (length fs) $ enumeratedIds "__arg"
-  parens $ seperated ", " emitIdent' args
-  emit " "
-  parens $ emitIdent t
-  emit " {"
-  seperated ", " emitIdent' args
-  line " }\n"
-emitConses (IRTaggedType t rs) = mapM_ emitCons rs >> line ""
+emitConses (IRTypeDef tn _ _ b) =
+  case b of
+    IRFunType _ _ -> return ()
+    IRCType _ -> return ()
+    IREnumType variants -> do
+        mapM_ (\v -> do
+                    emit "#define MK_"
+                    emitIdent' v
+                    emit "() "
+                    emitIdent $ v
+                    line "") variants
+        line ""
+    IRStructType (IRRecord c fs) -> do
+        emit "#define MK_"
+        emitIdent' c
+        let args = take (length fs) $ enumeratedIds "__arg"
+        parens $ seperated ", " emitIdent' args
+        emit " "
+        parens $ emitIdent tn
+        emit " {"
+        seperated ", " emitIdent' args
+        line " }\n"
+    IRTaggedType rs -> mapM_ emitCons rs >> line ""
   where
     emitCons (IRRecord c fs) = do
       emit "#define MK_"
@@ -320,7 +324,7 @@ emitConses (IRTaggedType t rs) = mapM_ emitCons rs >> line ""
       let args = take (length fs) $ enumeratedIds "__arg"
       parens $ seperated ", " emitIdent' args
       emit " "
-      parens $ emitIdent t
+      parens $ emitIdent tn
       emit " {."
       emitIdent' variantField
       emit " = "

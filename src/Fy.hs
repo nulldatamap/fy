@@ -13,6 +13,7 @@ import Fy.Ast
 import Fy.Parser
 import Fy.Naming
 import Fy.Typing
+import Fy.Mono
 import Fy.Lowering
 import Fy.Emit
 
@@ -48,11 +49,12 @@ compileAndRun f = do
     Right m -> do
       case namingCheck m of
         Left err -> putStrLn $ show err
-        Right m' -> do
-            case infer m' of
+        Right nm -> do
+            case infer nm of
                 Left err -> putStrLn $ show err
-                Right m'' -> do
-                  let ir = lowerToIR m''
+                Right tm -> do
+                  let mm = monomorphise tm
+                  let ir = lowerToIR mm
                   let outF = f ++ ".c"
                   let out = emitProgram ir
                   TIO.writeFile outF out

@@ -38,6 +38,7 @@ data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
 
 data TypeBody = TBConses [TypeCons]
               | TBCType Text
+              | TBAlias Type
   deriving (Show)
 
 data TypeDef = TypeDef { tdName :: Ident

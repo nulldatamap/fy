@@ -30,6 +30,7 @@ library
       Fy.Emit
       Fy.Ir
       Fy.Lowering
+      Fy.Mono
       Fy.Naming
       Fy.Parser
       Fy.Types

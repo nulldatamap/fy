@@ -29,6 +29,7 @@ data IRTypeBody = IREnumType [Ident]
                 | IRTaggedType [IRRecord]
                 | IRCType Text
                 | IRFunType IRType [IRType]
+                | IRTypeAlias IRType
                 deriving Show
 
 data IRTypeDef = IRTypeDef { irtdName :: Ident

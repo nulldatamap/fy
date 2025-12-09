@@ -4,7 +4,7 @@ module Fy.Types
      , Context(..)
      , mkId, suffixId, canonicalId, enumeratedIds
      , unnamedFields, variantField, typeName
-     , unFn, isFnTy, tUnit, tInt, tBool
+     , encodeType, unFn, isFnTy, tUnit, tInt, tBool
      ) where
 
 
@@ -15,7 +15,7 @@ import qualified Data.Text as T
 import Data.Hashable (Hashable)
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.List (intercalate)
+import Data.List (intercalate, elemIndex)
 import Data.Maybe (fromMaybe)
 import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
@@ -169,3 +169,30 @@ unFn _ = Nothing
 isFnTy :: Type -> Bool
 isFnTy (TFun _ _) = True
 isFnTy _          = False
+
+encodeType :: TypeScheme -> Text
+encodeType t =
+  T.concat $
+    case t of
+        (MonoType t0) -> encodeType' [] t0
+        (PolyType vs t0) -> ["S", T.show $ length vs] ++ encodeType' vs t0
+  where
+    encodeType' :: [TyVar] -> Type -> [Text]
+    encodeType' vs (TVar v) =
+      case elemIndex v vs of
+        Nothing -> error $ "Tried to encode a type with a free variable"
+        Just i -> [ "V", T.show i ]
+    encodeType' _ (TCons (Ident "int" [] Nothing) []) = ["i"]
+    encodeType' _ (TCons (Ident "bool" [] Nothing) []) = ["b"]
+    encodeType' _ (TCons (Ident "()" [] Nothing) []) = ["_"]
+    encodeType' vs (TCons c cs) =
+      let cs' = concatMap (encodeType' vs) cs
+          n0 = canonicalId c
+          n = [ "N", T.show $ T.length n0, canonicalId c ]
+      in if null cs
+         then n
+         else [ "I", T.show $ length cs ] ++ n ++ cs'
+    encodeType' vs (TFun ts t0) =
+      let ts' = concatMap (encodeType' vs) ts
+          t0' = encodeType' vs t0
+      in [ "F", T.show $ length ts ] ++ ts' ++ t0'

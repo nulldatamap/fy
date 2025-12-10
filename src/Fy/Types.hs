@@ -19,6 +19,7 @@ import Data.List (intercalate, elemIndex)
 import Data.Maybe (fromMaybe)
 import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
+import Prettyprinter
 
 data Ident = Ident { idName :: Text
                    , idNamespace :: [Text]
@@ -126,6 +127,15 @@ instance Show a => Show (TypeSchemeT a)  where
 instance Semigroup Ident where
   (<>) (Ident a aNs Nothing) (Ident b bNs bI) = Ident b (aNs ++ [a] ++ bNs) bI
   (<>) a b = error $ "Can't combine the idents: `" ++ (show a) ++ "` and `" ++  (show b) ++ "`"
+
+instance Pretty Ident where
+  pretty = viaShow
+
+instance Pretty Type where
+  pretty = viaShow
+
+instance (Show a) => Pretty (TypeSchemeT a) where
+  pretty = viaShow
 
 mkId :: Text -> Ident
 mkId x = Ident x [] Nothing

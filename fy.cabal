@@ -61,6 +61,7 @@ library
     , microlens-platform >=0.4.3 && <1
     , mtl ==2.*
     , parser-combinators >=1.3 && <2
+    , prettyprinter
     , process
     , text ==2.*
     , unordered-containers
@@ -94,6 +95,7 @@ executable fy-exe
     , microlens-platform >=0.4.3 && <1
     , mtl ==2.*
     , parser-combinators >=1.3 && <2
+    , prettyprinter
     , process
     , text ==2.*
     , unordered-containers
@@ -128,6 +130,7 @@ test-suite fy-test
     , microlens-platform >=0.4.3 && <1
     , mtl ==2.*
     , parser-combinators >=1.3 && <2
+    , prettyprinter
     , process
     , text ==2.*
     , unordered-containers

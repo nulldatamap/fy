@@ -30,6 +30,7 @@ dependencies:
 - process
 - unordered-containers
 - hashable
+- prettyprinter
 
 ghc-options:
 - -Wall

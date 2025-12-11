@@ -35,7 +35,7 @@ instance Pretty Repr where
   pretty (RSource f src) = "-- " <> (pretty f) <> line <> (pretty src)
   pretty (RUAst m) = pretty m
   pretty (RTAst m) = pretty m
-  pretty (RIr m)   = viaShow m
+  pretty (RIr m)   = pretty m
   pretty (RC m)    = pretty m
 
 data Pass = Pass { pName :: Text

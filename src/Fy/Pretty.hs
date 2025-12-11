@@ -3,6 +3,7 @@ module Fy.Pretty () where
 
 import Fy.Types
 import Fy.Ast
+import Fy.Ir
 
 import Data.Set (Set)
 import qualified Data.Set as S
@@ -135,3 +136,84 @@ instance (Show t, TypeAnn t) => Pretty (Module t) where
     where
       imDoc = map (\x -> "<-" <+> (pretty x)) im
       exDoc = map (\x -> "->" <+> (pretty x)) ex
+
+
+block :: [Doc a] -> Doc a
+block ds = (nst $ vsep $ "{":ds) <> line <> "}" <> line
+
+braced :: [Doc a] -> Doc a
+braced = encloseSep lbrace rbrace comma
+
+instance Pretty IRRecord where
+  pretty (IRRecord n fs) = (pretty n) <+> (braced $ map (\(t, x ) -> (pretty x) <+> ":" <+> (pretty t)) fs)
+
+instance Pretty IRTypeBody where
+  pretty (IREnumType es) = "enum" <+> (braced $ map pretty es)
+  pretty (IRStructType r) = "struct" <+> (pretty r)
+  pretty (IRTaggedType rs) = align $ vsep $ map (\r -> "tag" <+> (pretty r)) rs
+  pretty (IRCType c) = "ctype" <+> (pretty c)
+  pretty (IRFunType t ts) = "fptr" <+> (tupled $ map pretty ts) <+> "->" <+> (pretty t)
+  pretty (IRTypeAlias t) = "alias" <+> (pretty t)
+
+instance Pretty IRTypeDef where
+  pretty (IRTypeDef n rg isBoxed b) =
+    hsep $ [ if isBoxed then "ref-type" else "val-type"
+           , pretty n, braced $ map pretty $ S.toList rg, hng $ hsep ["=", pretty b] ]
+
+instance Pretty Operator where
+  pretty OpAdd = "+"
+  pretty OpEq = "=="
+  pretty OpAnd = "&&"
+
+instance Pretty IRLit where
+  pretty (IRInt i) = pretty i
+  pretty IRVoid = "()"
+
+instance Pretty IRExpr where
+  pretty (IRVar x) = pretty x
+  pretty (IROp o es) = (pretty o) <> (tupled $ map pretty es)
+  pretty (IRCall x es) = (pretty x) <> (tupled $ map pretty es)
+  pretty (IRCons t x es) = (pretty t) <> "/" <> (pretty x) <> (tupled $ map pretty es)
+  pretty (IRLit l) = pretty l
+  pretty (IRField e x) = (pretty e) <> "." <> (pretty x)
+  pretty (IRCheckVariant e x y) = (pretty x) <> "/" <> (pretty y) <> "?" <+> (pretty e)
+
+instance Pretty IRStmt where
+  pretty (IRDef t n mX) = hsep $ ["var", pretty n, ":", pretty t] ++ xDoc
+    where
+      xDoc =
+        case mX of
+          Nothing -> []
+          Just x -> ["=" <+> (pretty x)]
+  pretty (IRSet x e) = hsep $ [pretty x, "<-", pretty e]
+  pretty (IREval e) = pretty e
+  pretty (IRReturn e) = hsep $ ["return", pretty e]
+  pretty (IRIf e0 st0 [th@(IRIf _ _ _)]) =
+    hsep $ [ "if", pretty e0
+           , block $ map pretty st0
+           , "else", pretty th ]
+  pretty (IRIf e st0 st1) = hsep $ [ "if", pretty e
+                                   , block $ map pretty st0
+                                   , "else", block $ map pretty st1 ]
+  pretty (IRPanic x) = hsep $ ["panic", enclose "\"" "\"" $ pretty x]
+
+
+instance Pretty IRFunc where
+  pretty (IRFunc n _ ret args b) =
+    "func" <+> (pretty n) <> argsDoc <+> "->" <+> (pretty ret) <+> (block $ map pretty b)
+     where
+       argsDoc = tupled $ map (\(x, t) -> (pretty x) <+> ":" <+> (pretty t)) args
+
+instance Pretty IRType where
+  pretty (IRType t) = pretty t
+
+instance Pretty IRVarDecl where
+  pretty (IRVarDecl n _ t) = "var" <+> (pretty n) <+> ":" <+> (pretty t)
+
+instance Pretty IRProgram where
+  pretty (IRProgram n tys fns vs init) =
+    "module" <+> (pretty n) <> line
+      <> line <> (vsep $ map pretty tys) <> line
+      <> line <> (vsep $ map pretty vs) <> line
+      <> line <> ("init" <+> (block $ map pretty init)) <> line
+      <> line <> (vsep $ map pretty fns)

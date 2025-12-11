@@ -1,35 +1,85 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
-module Fy.Pretty () where
+module Fy.Pretty
+  ( CPretty(..)
+  ) where
 
 import Fy.Types
 import Fy.Ast
 import Fy.Ir
 
+import Data.Text (Text)
 import Data.Set (Set)
 import qualified Data.Set as S
 import Prettyprinter
+import Prettyprinter.Render.Terminal
 
-instance Pretty Lit where
-  pretty (LInt i) = pretty i
-  pretty LUnit = "()"
+type CDoc = Doc AnsiStyle
 
-class Pretty a => TypeAnn a where
-  prettyTypeAnn :: Doc b -> a -> Doc b
+class CPretty a where
+  cpretty :: a -> CDoc
+
+instance CPretty () where cpretty = pretty
+instance CPretty Int where cpretty = pretty
+instance CPretty Text where cpretty = pretty
+instance CPretty Integer where cpretty = pretty
+
+cdf :: CDoc -> CDoc
+cdf = annotate $ color White
+
+ckw :: CDoc -> CDoc
+ckw = annotate $ color Blue
+
+cig :: CDoc -> CDoc
+cig = annotate $ color Black
+
+cty :: CDoc -> CDoc
+cty = annotate $ colorDull Cyan
+
+ccn :: CDoc -> CDoc
+ccn = annotate $ color Red
+
+clc :: CDoc -> CDoc
+clc = annotate $ colorDull White
+
+cgl :: CDoc -> CDoc
+cgl = annotate $ color White
+
+cbi :: CDoc -> CDoc
+cbi = annotate $ color Yellow
+
+clt :: CDoc -> CDoc
+clt = annotate $ colorDull Magenta
+
+instance CPretty Ident where
+  cpretty = viaShow
+
+instance CPretty Type where
+  cpretty = viaShow
+
+instance (Show a) => CPretty (TypeSchemeT a) where
+  cpretty = viaShow
+
+instance CPretty Lit where
+  cpretty (LInt i) = clt $ cpretty i
+  cpretty LUnit = clt "()"
+
+class CPretty a => TypeAnn a where
+  prettyTypeAnn :: CDoc -> a -> CDoc
 
 instance TypeAnn () where
   prettyTypeAnn x _ = x
 
 instance TypeAnn Type where
-  prettyTypeAnn x t = x <+> ":" <+> (pretty t)
+  prettyTypeAnn x t = x <+> (cig $ ":" <+> (cpretty t))
 
-instance (Show a, Pretty a) => TypeAnn (TypeSchemeT a) where
-  prettyTypeAnn x (MonoType t) = x <+> ":" <+> (pretty t)
+instance (Show a, CPretty a) => TypeAnn (TypeSchemeT a) where
+  prettyTypeAnn x (MonoType t) = x <+> (cig $ ":" <+> (cpretty t))
   prettyTypeAnn x (PolyType ts t) =
-    x <+> ":" <+> ("forall" <+> (hsep $ map (pretty . TVar) ts) <+> "." <+> pretty t)
+    x <+> (cig $ ":" <+> ((ckw "forall") <+> (hsep $ map (cpretty . TVar) ts) <+> "." <+> cpretty t))
 
-instance Pretty Builtin where
-  pretty BAdd = "$$add"
-  pretty BEq = "$$eq"
+instance CPretty Builtin where
+  cpretty BAdd = cbi "$$add"
+  cpretty BEq = cbi "$$eq"
 
 nst :: Doc a -> Doc a
 nst = nest 2
@@ -37,105 +87,105 @@ nst = nest 2
 hng :: Doc a -> Doc a
 hng = hang 2
 
-prettyDeps :: Set Ident -> [Doc a]
+prettyDeps :: Set Ident -> [CDoc]
 prettyDeps deps =
   if S.null deps
   then []
-  else [enclose "{" "}" $ go $ S.toList deps]
+  else [cig $ enclose "{" "}" $ go $ S.toList deps]
   where
-    go :: [Ident] -> Doc a
+    go :: [Ident] -> CDoc
     go [] = emptyDoc
-    go [x] = pretty x
-    go (x0:x1:xs) = (pretty x0) <> "," <> (go $ x1:xs)
+    go [x] = cpretty x
+    go (x0:x1:xs) = (cpretty x0) <> "," <> (go $ x1:xs)
 
-instance (Show t, TypeAnn t) => Pretty (Binding t) where
-  pretty (Binding t n pub deps b) =
+instance (Show t, TypeAnn t) => CPretty (Binding t) where
+  cpretty (Binding t n pub deps b) =
     case b of
-      Val e -> "." <+> (align $ sep $ [pretty n]
+      Val e -> "." <+> (align $ sep $ [cdf $ cpretty n]
                                         ++ prettyDeps deps
-                                        ++ [nst $ sep ["=", pretty e]])
-      Fun f -> "." <+> pretty f
+                                        ++ [nst $ sep ["=", cpretty e]])
+      Fun f -> "." <+> cpretty f
 
-instance (Show t, TypeAnn t) => Pretty (Function t) where
-  pretty (Function n t args pub deps b) =
-    align $ sep $ [(hsep $ (pretty n):argsDoc) `prettyTypeAnn` t]
+instance (Show t, TypeAnn t) => CPretty (Function t) where
+  cpretty (Function n t args pub deps b) =
+    align $ sep $ [(hsep $ (cdf $ cpretty n):argsDoc) `prettyTypeAnn` t]
                     ++ prettyDeps deps
-                    ++ [nst $ sep ["=", pretty b]]
+                    ++ [nst $ sep ["=", cpretty b]]
     where
-      argsDoc :: [Doc a]
+      argsDoc :: [CDoc]
       argsDoc =
         if null args
         then ["()"]
-        else map (pretty . fst) args
+        else map (clc . cpretty . fst) args
 
-instance (Show t, TypeAnn t) => Pretty (Pat t) where
-  pretty (PHole t) = "_" `prettyTypeAnn` t
-  pretty (PLit t l) = (pretty l) `prettyTypeAnn` t
-  pretty (PBinding t x) = (pretty x) `prettyTypeAnn` t
-  pretty (PCons t x ps) = (parens $ hsep $ (pretty x) : (map pretty ps)) `prettyTypeAnn` t
+instance (Show t, TypeAnn t) => CPretty (Pat t) where
+  cpretty (PHole t) = (cig $ "_") `prettyTypeAnn` t
+  cpretty (PLit t l) = (cpretty l) `prettyTypeAnn` t
+  cpretty (PBinding t x) = (clc $ cpretty x) `prettyTypeAnn` t
+  cpretty (PCons t x ps) = (parens $ hsep $ (ccn $ cpretty x) : (map cpretty ps)) `prettyTypeAnn` t
 
-instance (Show t, TypeAnn t) => Pretty (Case t) where
-  pretty (Case p bs arm) = "|" <+> (hng $ sep $ [pretty p]
+instance (Show t, TypeAnn t) => CPretty (Case t) where
+  cpretty (Case p bs arm) = "|" <+> (hng $ sep $ [cpretty p]
                                                   ++ bsDoc
-                                                  ++ [hng $ sep $ ["->", (pretty arm)]])
+                                                  ++ [hng $ sep $ ["->", (cpretty arm)]])
     where
         bsDoc =
             if null bs
             then []
-            else [enclose "{" "}" $ go bs]
-        binding (x, t) = (pretty x) <+> ":" <+> (pretty t)
+            else [cig $ enclose "{" "}" $ go bs]
+        binding (x, t) = (cpretty x) <+> ":" <+> (cpretty t)
         go [] = emptyDoc
         go [x] = binding x
         go (x0:x1:xs) = (binding x0) <> "," <> (go $ x1:xs)
 
-instance (Show t, TypeAnn t) => Pretty (Expr t) where
-  pretty (ELit t l) = (pretty l) `prettyTypeAnn` t
-  pretty (ETup t es) = (tupled $ map pretty es) `prettyTypeAnn` t
-  pretty (EBuiltin _ b) = pretty b
-  pretty (EIdent t x) = (pretty x) `prettyTypeAnn` t
-  pretty (EApp t e es) = (parens $ hng $ sep $ map (group . pretty) (e:es)) `prettyTypeAnn` t
-  pretty (ELet t bs e) = parens $ align $ sep $ (pretty e) : (map pretty bs)
-  pretty (EIf t e0 e1 e2) = align $ vsep [ "if" <+> (pretty e0)
-                                         , "then" <+> (hng $ pretty e1)
-                                         , "else" <+> (hng $ pretty e2) ] `prettyTypeAnn` t
-  pretty (ECase t e0 cs) = (align $ sep $ (pretty e0):(map pretty cs)) `prettyTypeAnn` t
-  pretty (ELocal t x) = (pretty x) `prettyTypeAnn` t
-  pretty (EGlobal t x) = ("/" <> (pretty x)) `prettyTypeAnn` t
-  pretty (ECons t x) = parens $ (pretty x) `prettyTypeAnn` t
+instance (Show t, TypeAnn t) => CPretty (Expr t) where
+  cpretty (ELit t l) = (cpretty l) `prettyTypeAnn` t
+  cpretty (ETup t es) = (tupled $ map cpretty es) `prettyTypeAnn` t
+  cpretty (EBuiltin _ b) = cpretty b
+  cpretty (EIdent t x) = (clc $ cpretty x) `prettyTypeAnn` t
+  cpretty (EApp t e es) = (parens $ hng $ sep $ map (group . cpretty) (e:es)) `prettyTypeAnn` t
+  cpretty (ELet t bs e) = parens $ align $ sep $ (cpretty e) : (map cpretty bs)
+  cpretty (EIf t e0 e1 e2) = align $ vsep [ (ckw "if") <+> (cpretty e0)
+                                          , (ckw "then") <+> (hng $ cpretty e1)
+                                          , (ckw "else") <+> (hng $ cpretty e2) ] `prettyTypeAnn` t
+  cpretty (ECase t e0 cs) = (align $ sep $ (cpretty e0):(map cpretty cs)) `prettyTypeAnn` t
+  cpretty (ELocal t x) = (clc $ cpretty x) `prettyTypeAnn` t
+  cpretty (EGlobal t x) = (cgl $ cpretty x) `prettyTypeAnn` t
+  cpretty (ECons t x) = parens $ (ccn $ cpretty x) `prettyTypeAnn` t
 
-instance Pretty PathItem where
-  pretty (PathItem ps h alias) = hsep $ path : al
+instance CPretty PathItem where
+  cpretty (PathItem ps h alias) = hsep $ path : al
     where
       al =
         case alias of
           Nothing -> []
-          Just x -> ["=" <+> (pretty x)]
-      path :: Doc b
+          Just x -> ["=" <+> (cpretty x)]
+      path :: CDoc
       path = go ps h ""
-      go (p0:p1:ps') h r = go (p1:ps') h (r <> (pretty p0) <> "/")
-      go (p:ps') h r = go ps' h (r <> (pretty p))
+      go (p0:p1:ps') h r = go (p1:ps') h (r <> (cpretty p0) <> "/")
+      go (p:ps') h r = go ps' h (r <> (cpretty p))
       go [] Nothing r = r
       go [] (Just Nothing) r = r <> "/*"
-      go [] (Just (Just ns)) r = r <> "/" <> (tupled $ map pretty ns)
+      go [] (Just (Just ns)) r = r <> "/" <> (tupled $ map cpretty ns)
 
-instance Pretty TypeCons where
-  pretty (TypeCons n ms) = "|" <+> (hng $ sep $ (pretty n):(map pretty ms))
+instance CPretty TypeCons where
+  cpretty (TypeCons n ms) = "|" <+> (hng $ sep $ (ccn $ cpretty n):(map (cty . cpretty) ms))
 
-instance Pretty TypeBody where
-  pretty (TBConses cs) = align $ vsep $ map pretty cs
-  pretty (TBCType c) = "$$ctype" <+> (pretty c)
-  pretty (TBAlias n) = pretty n
+instance CPretty TypeBody where
+  cpretty (TBConses cs) = align $ vsep $ map cpretty cs
+  cpretty (TBCType c) = (cbi "$$ctype") <+> (cty $ cpretty c)
+  cpretty (TBAlias n) = cty $ cpretty n
 
-instance Pretty TypeDef where
-  pretty (TypeDef n prs b) =
-    ":" <+> (sep $ (pretty n):(map pretty prs) ++ [align $ sep ["=", pretty b]])
+instance CPretty TypeDef where
+  cpretty (TypeDef n prs b) =
+    ":" <+> (sep $ (cty $ cpretty n):(map (clc . cpretty) prs) ++ [align $ sep ["=", cpretty b]])
 
-instance (Show t, TypeAnn t) => Pretty (Module t) where
-  pretty (Module n im ex ts is) =
-    vsep $ (pretty n) : (exDoc ++ imDoc ++ (map pretty ts) ++ (map pretty is))
+instance (Show t, TypeAnn t) => CPretty (Module t) where
+  cpretty (Module n im ex ts is) =
+    vsep $ (cdf $ cpretty n) : (exDoc ++ imDoc ++ (map cpretty ts) ++ (map cpretty is))
     where
-      imDoc = map (\x -> "<-" <+> (pretty x)) im
-      exDoc = map (\x -> "->" <+> (pretty x)) ex
+      imDoc = map (\x -> "<-" <+> (cpretty x)) im
+      exDoc = map (\x -> "->" <+> (cpretty x)) ex
 
 
 block :: [Doc a] -> Doc a
@@ -144,76 +194,77 @@ block ds = (nst $ vsep $ "{":ds) <> line <> "}" <> line
 braced :: [Doc a] -> Doc a
 braced = encloseSep lbrace rbrace comma
 
-instance Pretty IRRecord where
-  pretty (IRRecord n fs) = (pretty n) <+> (braced $ map (\(t, x ) -> (pretty x) <+> ":" <+> (pretty t)) fs)
+instance CPretty IRRecord where
+  cpretty (IRRecord n fs) =
+    (ccn $ cpretty n) <+> (braced $ map (\(t, x ) -> (cpretty x) <+> ":" <+> (cpretty t)) fs)
 
-instance Pretty IRTypeBody where
-  pretty (IREnumType es) = "enum" <+> (braced $ map pretty es)
-  pretty (IRStructType r) = "struct" <+> (pretty r)
-  pretty (IRTaggedType rs) = align $ vsep $ map (\r -> "tag" <+> (pretty r)) rs
-  pretty (IRCType c) = "ctype" <+> (pretty c)
-  pretty (IRFunType t ts) = "fptr" <+> (tupled $ map pretty ts) <+> "->" <+> (pretty t)
-  pretty (IRTypeAlias t) = "alias" <+> (pretty t)
+instance CPretty IRTypeBody where
+  cpretty (IREnumType es) = (ckw "enum") <+> (braced $ map (ccn . cpretty) es)
+  cpretty (IRStructType r) = (ckw "struct") <+> (cpretty r)
+  cpretty (IRTaggedType rs) = align $ vsep $ map (\r -> (ckw "tag") <+> (cpretty r)) rs
+  cpretty (IRCType c) = (ckw "ctype") <+> (cbi $ cpretty c)
+  cpretty (IRFunType t ts) = (ckw "fptr") <+> (tupled $ map cpretty ts) <+> "->" <+> (cpretty t)
+  cpretty (IRTypeAlias t) = (ckw "alias") <+> (cpretty t)
 
-instance Pretty IRTypeDef where
-  pretty (IRTypeDef n rg isBoxed b) =
-    hsep $ [ if isBoxed then "ref-type" else "val-type"
-           , pretty n, braced $ map pretty $ S.toList rg, hng $ hsep ["=", pretty b] ]
+instance CPretty IRTypeDef where
+  cpretty (IRTypeDef n rg isBoxed b) =
+    hsep $ [ if isBoxed then (ckw "ref-type") else (ckw "val-type")
+           , cty $ cpretty n, cig $ braced $ map cpretty $ S.toList rg, hng $ hsep ["=", cpretty b] ]
 
-instance Pretty Operator where
-  pretty OpAdd = "+"
-  pretty OpEq = "=="
-  pretty OpAnd = "&&"
+instance CPretty Operator where
+  cpretty OpAdd = cbi "+"
+  cpretty OpEq = cbi "=="
+  cpretty OpAnd = cbi "&&"
 
-instance Pretty IRLit where
-  pretty (IRInt i) = pretty i
-  pretty IRVoid = "()"
+instance CPretty IRLit where
+  cpretty (IRInt i) = clt $ cpretty i
+  cpretty IRVoid = clt "()"
 
-instance Pretty IRExpr where
-  pretty (IRVar x) = pretty x
-  pretty (IROp o es) = (pretty o) <> (tupled $ map pretty es)
-  pretty (IRCall x es) = (pretty x) <> (tupled $ map pretty es)
-  pretty (IRCons t x es) = (pretty t) <> "/" <> (pretty x) <> (tupled $ map pretty es)
-  pretty (IRLit l) = pretty l
-  pretty (IRField e x) = (pretty e) <> "." <> (pretty x)
-  pretty (IRCheckVariant e x y) = (pretty x) <> "/" <> (pretty y) <> "?" <+> (pretty e)
+instance CPretty IRExpr where
+  cpretty (IRVar x) = clc $ cpretty x
+  cpretty (IROp o es) = (cbi $ cpretty o) <> (tupled $ map cpretty es)
+  cpretty (IRCall x es) = (cgl $ cpretty x) <> (tupled $ map cpretty es)
+  cpretty (IRCons t x es) = (ccn $ (cpretty t) <> "/" <> (cpretty x)) <> (tupled $ map cpretty es)
+  cpretty (IRLit l) = cpretty l
+  cpretty (IRField e x) = (cpretty e) <> "." <> (cpretty x)
+  cpretty (IRCheckVariant e x y) = (ccn $ (cpretty x) <> "/" <> (cpretty y) <> "?") <+> (cpretty e)
 
-instance Pretty IRStmt where
-  pretty (IRDef t n mX) = hsep $ ["var", pretty n, ":", pretty t] ++ xDoc
+instance CPretty IRStmt where
+  cpretty (IRDef t n mX) = hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t] ++ xDoc
     where
       xDoc =
         case mX of
           Nothing -> []
-          Just x -> ["=" <+> (pretty x)]
-  pretty (IRSet x e) = hsep $ [pretty x, "<-", pretty e]
-  pretty (IREval e) = pretty e
-  pretty (IRReturn e) = hsep $ ["return", pretty e]
-  pretty (IRIf e0 st0 [th@(IRIf _ _ _)]) =
-    hsep $ [ "if", pretty e0
-           , block $ map pretty st0
-           , "else", pretty th ]
-  pretty (IRIf e st0 st1) = hsep $ [ "if", pretty e
-                                   , block $ map pretty st0
-                                   , "else", block $ map pretty st1 ]
-  pretty (IRPanic x) = hsep $ ["panic", enclose "\"" "\"" $ pretty x]
+          Just x -> ["=" <+> (cpretty x)]
+  cpretty (IRSet x e) = hsep $ [clc $ cpretty x, "<-", cpretty e]
+  cpretty (IREval e) = cpretty e
+  cpretty (IRReturn e) = hsep $ [ckw "return", cpretty e]
+  cpretty (IRIf e0 st0 [th@(IRIf _ _ _)]) =
+    hsep $ [ ckw "if", cpretty e0
+           , block $ map cpretty st0
+           , ckw "else", cpretty th ]
+  cpretty (IRIf e st0 st1) = hsep $ [ ckw "if", cpretty e
+                                   , block $ map cpretty st0
+                                   , ckw "else", block $ map cpretty st1 ]
+  cpretty (IRPanic x) = hsep $ [ckw "panic", enclose "\"" "\"" $ cpretty x]
 
 
-instance Pretty IRFunc where
-  pretty (IRFunc n _ ret args b) =
-    "func" <+> (pretty n) <> argsDoc <+> "->" <+> (pretty ret) <+> (block $ map pretty b)
+instance CPretty IRFunc where
+  cpretty (IRFunc n _ ret args b) =
+    (ckw "func") <+> (cdf $ cpretty n) <> argsDoc <+> "->" <+> (cpretty ret) <+> (block $ map cpretty b)
      where
-       argsDoc = tupled $ map (\(x, t) -> (pretty x) <+> ":" <+> (pretty t)) args
+       argsDoc = tupled $ map (\(x, t) -> (clc $ cpretty x) <+> ":" <+> (cpretty t)) args
 
-instance Pretty IRType where
-  pretty (IRType t) = pretty t
+instance CPretty IRType where
+  cpretty (IRType t) = cty $ cpretty t
 
-instance Pretty IRVarDecl where
-  pretty (IRVarDecl n _ t) = "var" <+> (pretty n) <+> ":" <+> (pretty t)
+instance CPretty IRVarDecl where
+  cpretty (IRVarDecl n _ t) = (ckw "var") <+> (cpretty n) <+> ":" <+> (cpretty t)
 
-instance Pretty IRProgram where
-  pretty (IRProgram n tys fns vs init) =
-    "module" <+> (pretty n) <> line
-      <> line <> (vsep $ map pretty tys) <> line
-      <> line <> (vsep $ map pretty vs) <> line
-      <> line <> ("init" <+> (block $ map pretty init)) <> line
-      <> line <> (vsep $ map pretty fns)
+instance CPretty IRProgram where
+  cpretty (IRProgram n tys fns vs init) =
+    (ckw "module") <+> (cdf $ cpretty n) <> line
+      <> line <> (vsep $ map cpretty tys) <> line
+      <> line <> (vsep $ map cpretty vs) <> line
+      <> line <> ((ckw "init") <+> (block $ map cpretty init)) <> line
+      <> line <> (vsep $ map cpretty fns)

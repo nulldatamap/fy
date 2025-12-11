@@ -67,6 +67,10 @@ block x = do
 addDeps :: Ident -> Naming ()
 addDeps x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
 
+removeDeps :: [Ident] -> Naming ()
+removeDeps xs =
+    modify (\s -> s { nstDeps = (nstDeps s) S.\\ (S.fromList xs) })
+
 runNaming :: NameMap -> Naming a -> Either NamingError a
 runNaming gs n = runExcept (evalStateT n st)
   where
@@ -80,7 +84,9 @@ runNaming gs n = runExcept (evalStateT n st)
 withVars :: [(Ident, Ident)] -> Naming a -> Naming a
 withVars xs m = do
     d <- nstDepth <$> get
-    scoped (map (\(x, x') -> (x, NameEntry x' (NKLocal d))) xs) m
+    r <- scoped (map (\(x, x') -> (x, NameEntry x' (NKLocal d))) xs) m
+    removeDeps $ map snd xs
+    return r
 
 scopedVars' :: [Ident] -> Naming a -> Naming ([Ident], a)
 scopedVars' xs m = do
@@ -93,7 +99,9 @@ scopedVars' xs m = do
                             x' <- if isGlobal then return x else uniqId x
                             return (S.insert x seen, x':xs')) (S.empty, []) $ reverse xs
     let nk = if isGlobal then NKGlobal else (NKLocal d)
-    scoped (map (\(x, x') -> (x, NameEntry x' nk)) $ zip xs xs') $ ((,) xs') <$> m
+    r <- scoped (map (\(x, x') -> (x, NameEntry x' nk)) $ zip xs xs') $ ((,) xs') <$> m
+    removeDeps xs'
+    return r
 
 scopedVars :: [Ident] -> Naming a -> Naming a
 scopedVars xs m = snd <$> scopedVars' xs m
@@ -207,7 +215,7 @@ checkFunction :: Ident -> [Ident] -> Publicity -> UExpr -> Naming UFunction
 checkFunction f xs p e = do
   oldDepth <- nstDepth <$> get
   modify (\s -> s { nstDepth = oldDepth + 1 })
-  (xs', (body, deps)) <- scopedVars' xs $ block (checkExpr e)
+  ((xs', body), deps) <- block $ scopedVars' xs $ checkExpr e
   modify (\s -> s { nstDepth = oldDepth })
   return $ Function f (MonoType ()) (map (\x -> (x, ())) xs') p deps body
 

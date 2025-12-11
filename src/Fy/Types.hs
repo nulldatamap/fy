@@ -128,15 +128,6 @@ instance Semigroup Ident where
   (<>) (Ident a aNs Nothing) (Ident b bNs bI) = Ident b (aNs ++ [a] ++ bNs) bI
   (<>) a b = error $ "Can't combine the idents: `" ++ (show a) ++ "` and `" ++  (show b) ++ "`"
 
-instance Pretty Ident where
-  pretty = viaShow
-
-instance Pretty Type where
-  pretty = viaShow
-
-instance (Show a) => Pretty (TypeSchemeT a) where
-  pretty = viaShow
-
 mkId :: Text -> Ident
 mkId x = Ident x [] Nothing
 

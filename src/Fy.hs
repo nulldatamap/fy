@@ -13,6 +13,7 @@ import qualified Data.Text as T
 import Control.Monad (when, foldM)
 import Prettyprinter
 import Prettyprinter.Util
+import Prettyprinter.Render.Terminal
 
 import Fy.Types
 import Fy.Ast
@@ -31,12 +32,12 @@ data Repr = RSource String Text
           | RIr IRProgram
           | RC Text
 
-instance Pretty Repr where
-  pretty (RSource f src) = "-- " <> (pretty f) <> line <> (pretty src)
-  pretty (RUAst m) = pretty m
-  pretty (RTAst m) = pretty m
-  pretty (RIr m)   = pretty m
-  pretty (RC m)    = pretty m
+instance CPretty Repr where
+  cpretty (RSource f src) = cpretty src
+  cpretty (RUAst m) = cpretty m
+  cpretty (RTAst m) = cpretty m
+  cpretty (RIr m)   = cpretty m
+  cpretty (RC m)    = cpretty m
 
 data Pass = Pass { pName :: Text
                  , pRun  :: Repr -> Either String Repr }
@@ -119,7 +120,7 @@ runPasses opts r ps = foldM runPass r ps
           exitFailure
         Right rOut -> do
           when shouldPrint $
-            putDocW 100 $ (pretty rOut) <> line
+            putDoc $ (cpretty rOut) <> line
           return rOut
     shouldPrint = coPrintPasses opts
 

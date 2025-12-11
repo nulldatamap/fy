@@ -33,6 +33,7 @@ library
       Fy.Mono
       Fy.Naming
       Fy.Parser
+      Fy.Pretty
       Fy.Types
       Fy.Typing
       Fy.Util

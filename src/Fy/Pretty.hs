@@ -57,9 +57,15 @@ instance (Show t, TypeAnn t) => Pretty (Binding t) where
 
 instance (Show t, TypeAnn t) => Pretty (Function t) where
   pretty (Function n t args pub deps b) =
-    align $ sep $ [(hsep $ map pretty $ n:(map fst args)) `prettyTypeAnn` t]
+    align $ sep $ [(hsep $ (pretty n):argsDoc) `prettyTypeAnn` t]
                     ++ prettyDeps deps
                     ++ [nst $ sep ["=", pretty b]]
+    where
+      argsDoc :: [Doc a]
+      argsDoc =
+        if null args
+        then ["()"]
+        else map (pretty . fst) args
 
 instance (Show t, TypeAnn t) => Pretty (Pat t) where
   pretty (PHole t) = "_" `prettyTypeAnn` t

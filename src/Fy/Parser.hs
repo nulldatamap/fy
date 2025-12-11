@@ -143,10 +143,11 @@ pFullExpr = pLetExpr
 pBinding :: Parser UBinding
 pBinding = do
   x    <- symbol "." *> pIdent
-  args <- many pIdent
+  (isV, args) <- (symbol "()" *> (return $ (False, [])))
+                  <|> ((\as -> (null as, as)) <$> (many pIdent))
   body <- symbol "=" *> pCaseExpr
   return $
-    if null args
+    if isV
     then Binding (MonoType ()) x Private (S.empty) $ Val body
     else Binding (MonoType ()) x Private (S.empty) $
            Fun $ Function x (MonoType ()) (zip args $ repeat ()) Private (S.empty) body

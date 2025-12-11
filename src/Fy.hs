@@ -125,11 +125,14 @@ runPasses opts r ps = foldM runPass r ps
 
 compileAndRun :: String -> IO ()
 compileAndRun f = do
+  let opts = CompilerOpts True
   src <- TIO.readFile f
-  outR <- runPasses (CompilerOpts True) (RSource f src) passes
+  outR <- runPasses opts (RSource f src) passes
   case outR of
     RC out -> do
       let outF = f ++ ".c"
       TIO.writeFile outF out
+      when (coPrintPasses opts) $
+        putStrLn "\n========= Execution"
       callProcess "tcc/tcc.exe" ["-I", "./tcc/include", "-run", outF]
     _ -> error "Final pass result wasn't C source code"

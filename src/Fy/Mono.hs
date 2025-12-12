@@ -12,7 +12,9 @@ import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
 import Data.Maybe (isNothing)
 import Data.List (intersperse, find)
-
+import Data.Set (Set)
+import qualified Data.Set as S
+import Data.Graph (stronglyConnComp, flattenSCCs)
 
 data MonoSt = MonoSt { mstKnownTypes :: M.HashMap Ident TypeDef
                      , mstTypeInsts  :: M.HashMap Type TypeDef
@@ -33,6 +35,14 @@ registerFun :: TFunction -> Mono ()
 registerFun f =
   modify (\s -> s { mstKnownFuncs = M.insert (fName f) f (mstKnownFuncs s) } )
 
+registerFuns :: [TBinding] -> Mono ()
+registerFuns bs =
+  mapM_ (\x ->
+           case x of
+             Binding { bBody = Fun f } -> (registerFun f) >> return ()
+             _ -> return ())
+    bs
+
 instanciate :: Substitutable a => [Type] -> a -> a
 instanciate ts x = subst (Subst $ M.fromList $ zip [0 :: Int ..] ts) x
 
@@ -41,19 +51,12 @@ instanciateType [] td = return td
 instanciateType ts td@(TypeDef tn _ _) = do
   let td' = instanciate ts td
   let instSuffix = T.concat $ "_" : (intersperse "_" $ map encodeType $ map MonoType $ tdParams td')
-  return $ td' { tdName = (tdName td') `suffixId` instSuffix}
+  monoTypeDef td' { tdName = (tdName td') `suffixId` instSuffix
+                  , tdParams = [] }
 
-lookupTypeDef :: Type -> Mono TypeDef
-lookupTypeDef t@(TVar _) = error $ "Unresolved type variable during monomorphisation: " ++ (show t)
-lookupTypeDef t@(TFun ts rt) = do
-  tis <- mstTypeInsts <$> get
-  case M.lookup t tis of
-    Nothing -> do
-      let td = TypeDef (mkId $ encodeType $ MonoType t) [] $ TBAlias t
-      modify (\s -> s { mstTypeInsts = M.insert t td $ mstTypeInsts s })
-      return td
-    Just td -> return td
-lookupTypeDef t@(TCons c ts) = do
+instanciateTypeDef :: Ident -> [Type] -> Mono TypeDef
+instanciateTypeDef c ts = do
+  let t = TCons c ts
   tis <- mstTypeInsts <$> get
   case M.lookup t tis of
     Nothing -> do
@@ -75,11 +78,12 @@ instanciateFunc fx ft = do
     Just x -> return x
 
 tryInstanciateFunc :: Ident -> Type -> Mono Ident
-tryInstanciateFunc fx ft = do
+tryInstanciateFunc fx ft@(TFun _ _) = do
   mx <- instanciateFunc' fx ft
   case mx of
     Nothing -> return fx
     Just x -> return x
+tryInstanciateFunc fx _ = return fx
 
 instanciateFunc' :: Ident -> Type -> Mono (Maybe Ident)
 instanciateFunc' fx ft = do
@@ -106,31 +110,153 @@ instanciateFunc' fx ft = do
                     ++ ": " ++ (show err)
                   Right f' -> do
                     let fx' = (fName f') `suffixId` (T.append "_" $ encodeType $ MonoType ft)
-                    modify (\s -> s { mstFuncInsts = M.insert (fx', ft) f' (mstFuncInsts s) })
+                    f'' <- monoFunction $ f' { fName = fx' }
+                    modify (\s -> s { mstFuncInsts = M.insert (fx', ft) f'' (mstFuncInsts s) })
                     return $ Just fx'
 
--- monoBinding :: TBinding -> Mono TBinding
--- monoBinding b@(Binding { bBody = Val e }) = do
---   e' <- monoExpr e
---   return $ b { bBody = Val e' }
--- monoBinding b@(Binding { bType = MonoType t, bBody = Fun f }) = do
---   f' <- monoFunction f
---   return $ b { bBody = Fun f' }
-monoBinding b = return b
+instanciateFunTy :: [Type] -> Type -> Mono TypeDef
+instanciateFunTy ts rt = do
+  let t = TFun ts rt
+  tis <- mstTypeInsts <$> get
+  case M.lookup t tis of
+    Nothing -> do
+      let td = TypeDef (mkId $ encodeType $ MonoType t) [] $ TBAlias $ TFun ts rt
+      modify (\s -> s { mstTypeInsts = M.insert t td $ mstTypeInsts s })
+      return td
+    Just td -> return td
+
+monoType :: Type -> Mono Type
+monoType t | isBuiltinType t = return t
+monoType t@(TVar _) = return t
+monoType t@(TCons _ []) = return t
+monoType t@(TFun ts rt) = do
+  rt' <- monoType rt
+  ts' <- mapM monoType ts
+  let fty = TFun ts' rt'
+  if null $ freeVars fty
+  then ((`TCons` []) . tdName) <$> (instanciateFunTy ts' rt')
+  else return fty
+monoType t@(TCons c ts) = do
+  ts' <- mapM monoType ts
+  if null $ foldMap freeVars ts'
+  then ((`TCons` []) . tdName) <$> instanciateTypeDef c ts'
+  else return $ TCons c ts'
+
+monoTypeDef :: TypeDef -> Mono TypeDef
+monoTypeDef td = do
+  -- Just a safety check
+  ktds <- mstKnownTypes <$> get
+  td' <- monoTypeDef' td
+  case M.lookup (tdName td') ktds of
+    Just x -> error $ "Tried to monomorphise the same type twice! " ++ (show td) ++ " vs " ++ (show td')
+    Nothing -> do
+      modify (\s -> s { mstKnownTypes = M.insert (tdName td') td' $ mstKnownTypes s })
+      return td'
+
+monoTypeDef' :: TypeDef -> Mono TypeDef
+monoTypeDef' td@(TypeDef _ _ (TBAlias t)) = do
+  t' <- monoType t
+  return $ td { tdBody = TBAlias t' }
+monoTypeDef' td@(TypeDef _ _ (TBConses cs)) = do
+  cs' <- mapM monoTypeCons cs
+  return $ td { tdBody = TBConses cs' }
+  where
+    monoTypeCons :: TypeCons -> Mono TypeCons
+    monoTypeCons (TypeCons n ms) = (TypeCons n) <$> (mapM monoType ms)
+monoTypeDef' td = return td
+
+monoPat :: TPat -> Mono TPat
+monoPat (PHole t) = PHole <$> (monoType t)
+monoPat (PBinding t x) = (`PBinding` x) <$> (monoType t)
+monoPat (PCons t c ps) = PCons <$> (monoType t) <*> (return c) <*> (mapM monoPat ps)
+monoPat p = return p
+
+monoCase :: TCase -> Mono TCase
+monoCase (Case p bs e) =
+  Case <$> (monoPat p)
+       <*> (mapM (\(x, t) -> ((,) x) <$> (monoType t)) bs)
+       <*> (monoExpr e)
+
+monoExpr :: TExpr -> Mono TExpr
+monoExpr e =
+  case e of
+    EIdent t x -> error $ "Unexpected EIdent during monomorphisation, expected materialed refs instead: " ++ (show e)
+    EApp t e es -> (EApp t) -- EApp <$> (monoType t)
+                        <$> (monoExpr e)
+                        <*> (mapM monoExpr es)
+    EIf t e0 e1 e2 -> (EIf t) -- EIf <$> (monoType t)
+                          <$> (monoExpr e0)
+                          <*> (monoExpr e1)
+                          <*> (monoExpr e2)
+    EGlobal t x -> monoName EGlobal t x
+    ELocal t x -> monoName ELocal t x
+    ECons t cx -> (\t' -> ECons t' cx) <$> (monoType t)
+    ETup t es -> ETup <$> (monoType t) <*> (mapM monoExpr es)
+    ELet t bs e -> do
+      registerFuns bs
+      (ELet t) -- ELet <$> (monoType t)
+           <$> (mapM monoBinding bs)
+           <*> (monoExpr e)
+    ECase t e cs -> (ECase t) -- ECase <$> (monoType t)
+                          <$> (monoExpr e)
+                          <*> (mapM monoCase cs)
+    _ -> return e
+  where
+    monoName :: (Type -> Ident -> TExpr) -> Type -> Ident -> Mono TExpr
+    monoName c t x = c <$> (monoType t) <*> (tryInstanciateFunc x t)
+
+captureNewDeps :: Mono a -> Mono (a, Set Ident)
+captureNewDeps m = do
+  oldInsts <- getInstNames
+  r <- m
+  curInsts <- getInstNames
+  let newInsts = curInsts S.\\ oldInsts
+  return (r, newInsts)
+  where
+    getInstNames :: Mono (Set Ident)
+    getInstNames = (S.fromList . (map fst) . M.keys . mstFuncInsts) <$> get
+
+monoFunction :: TFunction -> Mono TFunction
+monoFunction f = do
+  (e', newInsts) <- captureNewDeps $ monoExpr $ fBody f
+  -- The functions that got instantiated while processing the body should
+  -- Become dependencies of this function
+  return $ f { fBody = e', fDeps = S.union (fDeps f) newInsts }
+
+monoBinding :: TBinding -> Mono TBinding
+monoBinding b@(Binding { bBody = Val e, bType = t }) = do
+  -- TODO: Mono signtures
+  t' <- monoType t
+  (e', newDeps) <- captureNewDeps $ monoExpr e
+  return $ b { bBody = Val e'
+             , bDeps = S.union newDeps (bDeps b)
+             , bType = t' }
+monoBinding b@(Binding { bBody = Fun f }) = do
+  f' <- monoFunction f
+  return $ b { bBody = Fun f', bDeps = (fDeps f) }
+
+orderTypeDefs :: [TypeDef] -> [TypeDef]
+orderTypeDefs tds =
+  let tdGraph = map (\td -> (td, tdName td, S.toList $ typeDeps td)) tds
+  in flattenSCCs $ stronglyConnComp tdGraph
+
+orderBindings :: [TBinding] -> [TBinding]
+orderBindings bs =
+  let bGraph = map (\b -> (b, bName b, S.toList $ bDeps b)) bs
+  in flattenSCCs $ stronglyConnComp bGraph
 
 monoModule :: TModule -> Mono TModule
 monoModule m = do
-  let tds = M.fromList $ map (\t@(TypeDef tn _ _) -> (tn, t)) $ mTypeDefs m
-  modify (\s -> s { mstKnownTypes =  M.union (mstKnownTypes s) tds })
+  -- First order the known types by dependencies
+  let orderedTds = orderTypeDefs $ mTypeDefs m
+  tds <- mapM monoTypeDef orderedTds
   -- TODO: All exported polymorphic functions should get realized as "boxed" parameter functions
-  mapM_ (\x ->
-           case x of
-             Binding { bBody = Fun f } -> (registerFun f) >> return ()
-             _ -> return ())
-    (mItems m)
-  _ <- instanciateFunc (mkId "main") (TFun [tUnit] tUnit)
+  registerFuns $ mItems m
   bs' <- mapM monoBinding $ mItems m
-  return $ m { mItems = bs' }
+  insts <- ((map bindingFromFunction) . M.elems . mstFuncInsts) <$> get
+  tds' <- (orderTypeDefs . (tds ++) . M.elems . mstTypeInsts) <$> get
+  return $ m { mItems = orderBindings $ insts ++ bs'
+             , mTypeDefs = tds' }
 
 monomorphise :: TModule -> TModule
 monomorphise m = runMono $ monoModule m

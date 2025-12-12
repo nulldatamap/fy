@@ -139,9 +139,7 @@ lookupTypeDef (TCons t []) = do
 lookupTypeDef t = error $ "Invalid type during lowering: " ++ (show t)
 
 lowerType :: Type -> Lowering IRType
-lowerType (TCons x@(Ident "int" [] Nothing) []) = return $ IRType x
-lowerType (TCons x@(Ident "bool" [] Nothing) []) = return $ IRType x
-lowerType (TCons x@(Ident "()" [] Nothing) []) = return $ IRType x
+lowerType t@(TCons x []) | isBuiltinType t = return $ IRType x
 lowerType t = do
   td <- lookupTypeDef t
   return $ IRType $ irtdName td

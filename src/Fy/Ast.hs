@@ -6,7 +6,7 @@ module Fy.Ast
   , Module(..), PathItem(..), Publicity(..)
   , UModule, UProgram, UPat, UCase, UExpr, UFunction, UBinding
   , TModule, TProgram, TPat, TCase, TExpr, TFunction, TBinding
-  , isFun
+  , isFun, bindingFromFunction, TypeDeps(..)
   ) where
 
 
@@ -167,8 +167,31 @@ instance Substitutable TypeDef where
 
 instance Substitutable (Module Type) where
   subst s m@(Module { mTypeDefs = ts, mItems = bs }) =
-    m { mTypeDefs = map (subst s) ts
-      , mItems = map (subst s) bs }
+    m { mItems = map (subst s) bs }
+
+class TypeDeps a where
+  typeDeps :: a -> Set Ident
+
+instance TypeDeps Type where
+  typeDeps (TFun ts t) = S.union (typeDeps t) $ S.unions $ map typeDeps ts
+  typeDeps (TCons c ts) = S.insert c $ S.unions $ map typeDeps ts
+  typeDeps _ = S.empty
+
+instance TypeDeps TypeCons where
+  typeDeps (TypeCons _ ts) = S.unions $ map typeDeps ts
+
+instance TypeDeps TypeBody where
+  typeDeps (TBConses cs) = S.unions $ map typeDeps cs
+  typeDeps (TBAlias t) = typeDeps t
+  typeDeps _ = S.empty
+
+
+instance TypeDeps TypeDef where
+  typeDeps (TypeDef _ _ b) = typeDeps b
+
+
+bindingFromFunction :: Function a -> Binding a
+bindingFromFunction f@(Function n t _ p d _) = Binding t n p d (Fun f)
 
 isFun :: ValOrFun t -> Bool
 isFun (Fun _) = True

@@ -4,6 +4,7 @@ module Fy.Types
      , Context(..)
      , mkId, suffixId, canonicalId, enumeratedIds
      , unnamedFields, variantField, typeName
+     , builtinTypeNames, isBuiltinType
      , encodeType, unFn, isFnTy, tUnit, tInt, tBool
      ) where
 
@@ -163,6 +164,13 @@ tBool = TCons (mkId "bool") []
 tUnit :: Type
 tUnit = TCons (mkId "()") []
 
+builtinTypeNames :: [Text]
+builtinTypeNames = ["int", "bool", "9"]
+
+isBuiltinType :: Type -> Bool
+isBuiltinType (TCons (Ident x [] Nothing) []) = x `elem` builtinTypeNames
+isBuiltinType _ = False
+
 unFn :: Type -> Maybe ([Type], Type)
 unFn (TFun ts t) = Just (ts, t)
 unFn _ = Nothing
@@ -181,7 +189,7 @@ encodeType t =
     encodeType' :: [TyVar] -> Type -> [Text]
     encodeType' vs (TVar v) =
       case elemIndex v vs of
-        Nothing -> error $ "Tried to encode a type with a free variable"
+        Nothing -> error $ "Tried to encode a type with a free variable: " ++ (show t)
         Just i -> [ "V", T.show i ]
     encodeType' _ (TCons (Ident "int" [] Nothing) []) = ["i"]
     encodeType' _ (TCons (Ident "bool" [] Nothing) []) = ["b"]

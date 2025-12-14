@@ -44,6 +44,7 @@ data TypeBody = TBConses [TypeCons]
 
 data TypeDef = TypeDef { tdName :: Ident
                        , tdParams :: [Type]
+                       , tdRecursionGroup :: Set Ident
                        , tdBody :: TypeBody }
   deriving (Show)
 
@@ -162,7 +163,7 @@ instance Substitutable TypeBody where
   subst _ x = x
 
 instance Substitutable TypeDef where
-  subst s (TypeDef n ps b) = TypeDef n (map (subst s) ps) $ subst s b
+  subst s (TypeDef n ps rg b) = TypeDef n (map (subst s) ps) rg $ subst s b
 
 instance Substitutable (Module Type) where
   subst s m@(Module { mItems = bs }) =
@@ -186,7 +187,7 @@ instance TypeDeps TypeBody where
 
 
 instance TypeDeps TypeDef where
-  typeDeps (TypeDef _ _ b) = typeDeps b
+  typeDeps (TypeDef _ _ _ b) = typeDeps b
 
 bindingFromFunction :: Function a -> Binding a
 bindingFromFunction f@(Function n t _ p d _) = Binding t n p d (Fun f)

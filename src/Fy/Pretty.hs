@@ -179,8 +179,10 @@ instance CPretty TypeBody where
   cpretty (TBAlias n) = cty $ cpretty n
 
 instance CPretty TypeDef where
-  cpretty (TypeDef n prs b) =
-    ":" <+> (sep $ (cty $ cpretty n):(map (clc . cpretty) prs) ++ [align $ sep ["=", cpretty b]])
+  cpretty (TypeDef n prs recGroup b) =
+    ":" <+> (sep $ (cty $ cpretty n):(map (clc . cpretty) prs)
+                     ++ (prettyDeps recGroup)
+                     ++ [align $ sep ["=", cpretty b]])
 
 instance (Show t, TypeAnn t) => CPretty (Module t) where
   cpretty (Module n im ex ts is) =

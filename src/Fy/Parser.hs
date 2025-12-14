@@ -188,7 +188,7 @@ pTypeDef = do
   x <- symbol ":" *> pIdent
   ps <- many ((\tn -> TCons tn []) <$> pIdent)
   b <- optional $ symbol "=" >> pDefOrCType
-  return $ TypeDef x ps $ fromMaybe (TBConses []) b
+  return $ TypeDef x ps S.empty $ fromMaybe (TBConses []) b
   where
     pDefOrCType =
       -- TODO: Should be a string

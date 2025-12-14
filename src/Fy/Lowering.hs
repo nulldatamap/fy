@@ -19,6 +19,8 @@ import Control.Monad.State
 import Control.Monad.RWS
 import qualified Data.HashMap.Strict as M
 
+import Debug.Trace (trace)
+
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
                              , lstTypes :: M.HashMap Ident IRTypeDef }
@@ -125,22 +127,19 @@ matchBoxing targetTy incomingTy e = do
     (False, True) -> return $ IRUnbox e
     _ -> return e
 
-boxArguments :: IRType -> [(IRType, IRExpr)] -> Lowering [IRExpr]
-boxArguments fty args = do
-  fty' <- resolveType fty
-  case fty' of
-    IRTDef (IRTypeDef { irtdBody = IRFunType _ ts }) -> do
-      mapM (\(targetT, (incomingT, e)) ->
-              matchBoxing targetT incomingT e)
-        (zip ts args)
-    _ -> error $ "Expected function type, got: " ++ (show fty')
+boxArguments :: [IRType] -> [(IRType, IRExpr)] -> Lowering [IRExpr]
+boxArguments ts args =
+  mapM (\(targetT, (incomingT, e)) ->
+          matchBoxing targetT incomingT e)
+    (zip ts args)
 
 spillExpr :: Text -> TExpr -> Lowering Ident
 spillExpr n e = do
-  te' <- lowerExpr' e
-  case te' of
-    (_, IRVar x) -> return x
-    (t', e') -> do
+  e' <- lowerExpr e
+  case e' of
+    IRVar x -> return x
+    _ -> do
+      t' <- lowerType $ typeOf e
       x <- newVar' (Just n)
       tell [ IRDef t' x $ Just e' ]
       return x
@@ -162,6 +161,14 @@ lowerExpr' e = do
   t <- lowerType (typeOf e)
   return (t, e')
 
+lowerFunType :: Type -> Lowering (IRType, [IRType])
+lowerFunType (TFun ts t) = (,) <$> (lowerType t) <*> (mapM lowerType ts)
+lowerFunType t = do
+  td <- lookupTypeDef t
+  case irtdBody td of
+    IRFunType t rt -> return (t, rt)
+    _ -> error $ "Expected a function type: " ++ (show t)
+
 lowerExpr :: TExpr -> Lowering IRExpr
 lowerExpr e =
   case e of
@@ -180,8 +187,8 @@ lowerExpr e =
                 BEq  -> OpEq
       return $ IROp o xs'
     EApp t fe xs -> do
-      ft <- lowerType $ typeOf fe
-      xs' <- (boxArguments ft) =<< (mapM lowerExpr' xs)
+      (_, prmTys) <- lowerFunType $ typeOf fe
+      xs' <- (boxArguments prmTys) =<< (mapM lowerExpr' xs)
       case fe of
         ECons _ (Ident cn _ _) -> do
           t' <- lowerType t
@@ -217,6 +224,10 @@ lookupTypeDef (TCons t _) = do
     Nothing -> error $ "Unresolved type during lowering: " ++ (show t)
     Just td -> return td
 lookupTypeDef t = error $ "Invalid type during lowering: " ++ (show t)
+
+lowerType' :: Set Ident -> Type -> Lowering IRType
+lowerType' rg (TCons x _) | S.member x rg = return $ IRType x
+lowerType' _ t = lowerType t
 
 lowerType :: Type -> Lowering IRType
 lowerType (TVar _) = return IRBoxType
@@ -320,44 +331,44 @@ lowerVals bs = stmts $
            _ -> error $ "Function binding passed to lowerVals: " ++ (show b))
     bs
 
-mkTypeDef :: Ident -> IRTypeBody -> IRTypeDef
-mkTypeDef n b = IRTypeDef n S.empty False b
+mkTypeDef :: Ident -> Set Ident -> IRTypeBody -> IRTypeDef
+mkTypeDef n rg b = IRTypeDef n rg False b
 
-lowerTypeDef :: Set Ident -> TypeDef -> Lowering IRTypeDef
-lowerTypeDef recGroup td = do
+lowerTypeDef :: TypeDef -> Lowering IRTypeDef
+lowerTypeDef td = do
   td' <- lowerTypeDef' td
-  return $ annotateType recGroup td'
+  return $ annotateType td'
 
 lowerTypeDef' :: TypeDef -> Lowering IRTypeDef
-lowerTypeDef' (TypeDef n _ (TBCType ct)) = return $ mkTypeDef n $ IRCType ct
-lowerTypeDef' (TypeDef _ _ (TBConses [])) = error $ "Zero types are not supported yet"
-lowerTypeDef' (TypeDef n _ (TBConses [(TypeCons c ts)])) = do
-  ts' <- mapM lowerType ts
+lowerTypeDef' (TypeDef n _ _ (TBCType ct)) = return $ mkTypeDef n S.empty $ IRCType ct
+lowerTypeDef' (TypeDef _ _ _ (TBConses [])) = error $ "Zero types are not supported yet"
+lowerTypeDef' (TypeDef n _ rg (TBConses [(TypeCons c ts)])) = do
+  ts' <- mapM (lowerType' rg) ts
   let r = IRRecord (bare c) $ zip ts' unnamedFields
-  return $ mkTypeDef n $ IRStructType r
-lowerTypeDef' (TypeDef n _ (TBConses cs)) = do
+  return $ mkTypeDef n rg $ IRStructType r
+lowerTypeDef' (TypeDef n _ rg (TBConses cs)) = do
   if allTags
-  then return $ mkTypeDef n $ IREnumType $ reverse variants
+  then return $ mkTypeDef n rg $ IREnumType $ reverse variants
   else do
     rs <- mapM (\(TypeCons c ts) -> do
-                    ts' <- mapM lowerType ts
+                    ts' <- mapM (lowerType' rg) ts
                     return $ IRRecord (bare c) $ zip ts' unnamedFields)
            cs
-    return $ mkTypeDef n $ IRTaggedType rs
+    return $ mkTypeDef n rg $ IRTaggedType rs
   where
     (allTags, variants) =
       foldl (\(a, vs) (TypeCons v ts) -> (a && (null ts), (bare v) : vs)) (True, []) cs
-lowerTypeDef' (TypeDef n _ (TBAlias (TFun ts t))) = do
-  ts' <- mapM lowerType ts
-  t' <- lowerType t
-  return $ mkTypeDef n $ IRFunType t' ts'
-lowerTypeDef' (TypeDef n _ (TBAlias t)) = do
-  t' <- lowerType t
-  return $ mkTypeDef n $ IRTypeAlias t'
+lowerTypeDef' (TypeDef n _ rg (TBAlias (TFun ts t))) = do
+  ts' <- mapM (lowerType' rg) ts
+  t' <- lowerType' rg t
+  return $ mkTypeDef n rg $ IRFunType t' ts'
+lowerTypeDef' (TypeDef n _ rg (TBAlias t)) = do
+  t' <- lowerType' rg t
+  return $ mkTypeDef n rg $ IRTypeAlias t'
 
-annotateType :: Set Ident -> IRTypeDef -> IRTypeDef
-annotateType recGroup (IRTypeDef tn _ _ body) =
-  IRTypeDef tn recGroup isBoxed body
+annotateType :: IRTypeDef -> IRTypeDef
+annotateType td@(IRTypeDef _ recGroup _ body) =
+  td { irtdIsBoxed = isBoxed }
   where
     isBoxed =
       if S.null recGroup
@@ -373,7 +384,7 @@ annotateType recGroup (IRTypeDef tn _ _ body) =
 lowerTypeDefs :: [TypeDef] -> Lowering [IRTypeDef]
 lowerTypeDefs tds = do
   mapM (\td -> do
-          td' <- lowerTypeDef S.empty td
+          td' <- lowerTypeDef td
           modify (\s -> s { lstTypes = M.insert (irtdName td') td' (lstTypes s) })
           return td')
     tds

@@ -9,7 +9,7 @@ import Fy.Ast
 
 import Prelude hiding (lookup, lines)
 import qualified Data.Set as S
-import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import Control.Monad (when)
 import Control.Monad.State
@@ -22,7 +22,7 @@ data TypingSt = TypingSt { nextId       :: Int
                          , env          :: Env }
 
 data TypingError = UnificationError Type Type
-                 | OccursCheck
+                 | OccursCheck TyVar Type
                  | UndefinedVar Ident
                  | InvalidRecursion (NonEmpty Ident)
                  deriving (Show)
@@ -56,7 +56,7 @@ fresh = TVar <$> fresh'
   st <- get
   let sub = currentSubst st
   let t = sub `subst` t'
-  when (x `elem` (freeVars t)) $ throwError OccursCheck
+  when (x `elem` (freeVars t)) $ throwError $ OccursCheck x t
   let x' = sub `subst` (TVar x)
   case x' of
     TVar y | x == y -> return ()
@@ -69,6 +69,7 @@ instance Context Typing Ident TypeScheme TypingError where
   undefinedVar = throwError . UndefinedVar
 
 unify :: Type -> Type -> Typing ()
+unify (TVar x) (TVar y) | x == y = return ()
 unify (TVar x) y = x =:= y
 unify x (TVar y) = y =:= x
 unify ty@(TCons x xs) tx@(TCons y ys) =
@@ -107,8 +108,9 @@ runTyping :: Typing a -> Either TypingError a
 runTyping t = runExcept $ evalStateT t defaultTypingSt
 
 introTypeConses :: TypeDef -> Typing ()
-introTypeConses (TypeDef _ _ (TBCType _)) = return ()
-introTypeConses (TypeDef t ps (TBConses cs)) = mapM_ (introTypeCons ps (TCons t ps)) cs
+introTypeConses (TypeDef _ _ _ (TBCType _)) = return ()
+introTypeConses (TypeDef _ _ _ (TBAlias _)) = return ()
+introTypeConses (TypeDef t ps _ (TBConses cs)) = mapM_ (introTypeCons ps (TCons t ps)) cs
 
 introTypeCons :: [Type] -> Type -> TypeCons -> Typing ()
 introTypeCons ps t (TypeCons c ts) =
@@ -125,21 +127,29 @@ introTypeCons ps t (TypeCons c ts) =
                     ct
   in modify (\s -> s { env = M.insert c ct' $ env s })
 
+inferFunction' :: UFunction -> [Type] -> Type -> Typing TFunction
+inferFunction' f prmTys retTy = do
+  let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
+  e' <- scoped prms $ inferExpr $ fBody f
+  unify (typeOf e') retTy
+  fty <- realize $ TFun prmTys retTy
+  return $ Function { fName = fName f
+                    , fType = MonoType fty
+                    , fArgs = zip (map fst $ fArgs f) prmTys
+                    , fPub  = fPub f
+                    , fDeps = fDeps f
+                    , fBody = e' }
+
 inferFunction :: UFunction -> Typing TFunction
 inferFunction f = do
   prmTys <- mapM (const fresh) $ fArgs f
-  let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
-  e' <- scoped prms $ inferExpr $ fBody f
   retTy <- fresh
-  unify (typeOf e') retTy
-  fty <- realize $ TFun prmTys retTy
-  fty' <- generalize fty
-  realize $ Function { fName = fName f
-                     , fType = fty'
-                     , fArgs = zip (map fst $ fArgs f) prmTys
-                     , fPub  = fPub f
-                     , fDeps = fDeps f
-                     , fBody = e' }
+  f' <- inferFunction' f prmTys retTy
+  case fType f' of
+    MonoType fty -> do
+      fty' <- generalize fty
+      realize $ f' { fType = fty' }
+    _ -> error $ "Expected function type to be mono: " ++ (show f)
 
 inferBindings :: [UBinding] -> ([TBinding] -> Typing a) -> Typing a
 inferBindings ls innerF =
@@ -148,7 +158,57 @@ inferBindings ls innerF =
 
 inferWithSccBindings :: [SCC UBinding] -> ([TBinding] -> Typing a) -> [TBinding] -> Typing a
 inferWithSccBindings [] innerF ls' = innerF $ reverse ls'
-inferWithSccBindings ((NECyclicSCC xs):_) _ _ = throwError $ InvalidRecursion $ NE.map bName xs
+inferWithSccBindings ((NECyclicSCC xs):_) _ _ | not $ any (isFun . bBody) xs =
+  throwError $ InvalidRecursion $ NE.map bName xs
+inferWithSccBindings ((NECyclicSCC xs0:ls)) innerF ls' = do
+  let xs = NE.toList xs0
+  -- Make fresh variables for everything
+  tys <- mapM (\l ->
+                 case bBody l of
+                   Val _ -> fresh
+                   Fun f -> do
+                     prmTys <- mapM (const fresh) $ fArgs f
+                     retTy <- fresh
+                     return $ TFun prmTys retTy
+                )
+             xs
+  -- With the non-generalized variables, infer each item:
+  xs' <- scoped (zipWith (\x t -> (bName x, MonoType t)) xs tys) $
+          mapM (\(x, t) -> do
+                     case bBody x of
+                       Val e0 -> do
+                         e0' <- inferExpr e0
+                         unify (typeOf e0') t
+                         return $ x { bType = MonoType t, bBody = Val e0' }
+                       Fun f -> do
+                         case t of
+                           TFun prmTys retTy -> do
+                             f' <- inferFunction' f prmTys retTy
+                             case fType f' of
+                               MonoType fty -> do
+                                 unify t fty
+                                 return x { bType = MonoType t, bBody = Fun f' }
+                               _ -> error $ "Expected montype: " ++ (show f')
+                           _ -> error $ "Unexpected type for: " ++ (show t) ++ " for " ++ (show f))
+            (zip xs tys)
+  -- Then finally generalize and realize the them:
+  res <- mapM (\l ->
+                 case bBody l of
+                   Val e0 -> do
+                     t <- realize $ typeOf e0
+                     t' <- generalize t
+                     return (l { bBody = Val e0 }, t')
+                   Fun f -> do
+                     case fType f of
+                       MonoType fty -> do
+                         fty' <- generalize =<< realize fty
+                         f' <- realize $ f { fType = fty' }
+                         return (l { bBody = Fun f' }, fType f')
+                       _ -> error $ "Expected monotype: " ++ (show f))
+           xs'
+  -- And do the rest
+  scoped (map (\(l, t) -> (bName l, t)) res) $
+    inferWithSccBindings ls innerF $ (map fst res) ++ ls'
 inferWithSccBindings ((AcyclicSCC l):ls) innerF ls' = do
   (vof, t') <- case bBody l of
       Val e0 -> do

@@ -236,13 +236,13 @@ checkTypeDef td = do
   checkTypeDef' td
 
 checkTypeDef' :: TypeDef -> Naming TypeDef
-checkTypeDef' td@(TypeDef _ _ (TBCType _)) = return td
-checkTypeDef' td@(TypeDef _ _ (TBAlias t)) = do
+checkTypeDef' td@(TypeDef _ _ _ (TBCType _)) = return td
+checkTypeDef' td@(TypeDef _ _ _ (TBAlias t)) = do
   t' <- checkType [] t
   return $ td { tdBody = TBAlias t' }
-checkTypeDef' (TypeDef tn tPrms (TBConses cs)) = do
+checkTypeDef' (TypeDef tn tPrms rg (TBConses cs)) = do
   cs' <- mapM checkAndIntroCons cs
-  return $ TypeDef tn (take (length tPrms) $ map TVar [0 :: Int ..]) (TBConses cs')
+  return $ TypeDef tn (take (length tPrms) $ map TVar [0 :: Int ..]) rg (TBConses cs')
   where
     ps = map (\pt ->
                   case pt of
@@ -258,7 +258,7 @@ checkTypeDef' (TypeDef tn tPrms (TBConses cs)) = do
 checkTypeDefs :: [TypeDef] -> Naming [TypeDef]
 checkTypeDefs tds = do
   types <-
-      foldM (\m (TypeDef tn _ tb) ->
+      foldM (\m (TypeDef tn _ _ tb) ->
                if tn `M.member` m
                then throwError $ DuplicateNames [tn]
                else return $ M.insert tn (Just tb) m)

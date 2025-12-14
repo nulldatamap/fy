@@ -233,6 +233,15 @@ emitType (IRType (Ident "()" [] Nothing)) = emit "__fy_unit"
 emitType (IRType x) = emitIdent x
 emitType IRBoxType = emit "void*"
 
+emitType' :: Ident -> IRType -> Emitter ()
+emitType' n t =
+  case t of
+    IRType tn | tn == n -> do
+      emit "struct "
+      emitIdent n
+      emit "_unboxed*"
+    _ -> emitType t
+
 emitEnum :: Ident -> Bool -> [Ident] -> Emitter ()
 emitEnum t isVariant vs = do
     indent
@@ -243,17 +252,17 @@ emitEnum t isVariant vs = do
     emitIdent t
     when isVariant $ emit "__variant"
     line ";\n"
-emitStruct' :: Bool -> Ident -> IRRecord -> Bool -> Emitter ()
-emitStruct' isField n (IRRecord _ fs) isBoxed = do
+emitStruct' :: Ident -> Bool -> Ident -> IRRecord -> Bool -> Emitter ()
+emitStruct' tn isField n (IRRecord _ fs) isBoxed = do
   indent
   emit "struct "
   when isBoxed $ do
-    emitIdent n
+    emitIdent tn
     emit "_unboxed "
   braceBlock $ do
       mapM_ (\(t, f) -> do
               indent
-              emitType t
+              emitType' tn t
               emit " "
               emitIdent' f
               line ";")
@@ -266,7 +275,7 @@ emitStruct' isField n (IRRecord _ fs) isBoxed = do
   line ";"
 
 emitStruct :: Ident -> IRRecord -> Bool -> Emitter ()
-emitStruct n r isBoxed = emitStruct' False n r isBoxed
+emitStruct n r isBoxed = emitStruct' n False n r isBoxed
 
 emitTypeDef :: IRTypeDef -> Emitter ()
 emitTypeDef (IRTypeDef t _ isBoxed b) = do
@@ -299,7 +308,7 @@ emitTypeDef (IRTypeDef t _ isBoxed b) = do
         indent
         emit "union "
         braceBlock $
-          mapM_ (\r@(IRRecord c _) -> emitStruct' True c r False) rs
+          mapM_ (\r@(IRRecord c _) -> emitStruct' t True c r False) rs
         line ";"
       when isBoxed $ emit "*"
       emit " "

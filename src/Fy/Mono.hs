@@ -12,11 +12,10 @@ import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
 import Data.Maybe (isNothing)
 import Data.List (intersperse, find)
+import qualified Data.List.NonEmpty as NE
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.Graph (stronglyConnComp, flattenSCCs)
-
-import Debug.Trace (trace)
+import Data.Graph (stronglyConnComp, flattenSCCs, SCC(..))
 
 data MonoSt = MonoSt { mstKnownTypes :: M.HashMap Ident TypeDef
                      , mstTypeInsts  :: M.HashMap Type TypeDef
@@ -48,13 +47,15 @@ registerFuns bs =
 instanciate :: Substitutable a => [Type] -> a -> a
 instanciate ts x = subst (Subst $ M.fromList $ zip [0 :: Int ..] ts) x
 
-instanciateType :: [Type] -> TypeDef -> Mono TypeDef
-instanciateType [] td = return td
-instanciateType ts td@(TypeDef tn _ _) = do
+instanciateType :: Type -> [Type] -> TypeDef -> Mono TypeDef
+instanciateType _ [] td = return td
+instanciateType t ts td@(TypeDef tn _ _ _) = do
   let td' = instanciate ts td
   let instSuffix = T.concat $ "_" : (intersperse "_" $ map encodeType $ map MonoType $ tdParams td')
-  monoTypeDef td' { tdName = (tdName td') `suffixId` instSuffix
-                  , tdParams = [] }
+  let td'' = td' { tdName = (tdName td') `suffixId` instSuffix
+                 , tdParams = [] }
+  modify (\s -> s { mstTypeInsts = M.insert t td'' $ mstTypeInsts s })
+  monoTypeDef td''
 
 instanciateTypeDef :: Ident -> [Type] -> Mono TypeDef
 instanciateTypeDef c ts = do
@@ -66,7 +67,7 @@ instanciateTypeDef c ts = do
         case M.lookup c tds of
           Nothing -> error $ "Couldn't resolve type: " ++ (show t)
           Just td -> do
-            td' <- instanciateType ts td
+            td' <- instanciateType t ts td
             modify (\s -> s { mstTypeInsts = M.insert t td' $ mstTypeInsts s })
             return td'
     Just td -> return td
@@ -80,6 +81,7 @@ instanciateFunc fx ft = do
     Just x -> return x
 
 tryInstanciateFunc :: Ident -> Type -> Mono Ident
+tryInstanciateFunc fx ft | not $ null $ freeVars ft = return fx
 tryInstanciateFunc fx ft@(TFun _ _) = do
   mx <- instanciateFunc' fx ft
   case mx of
@@ -103,15 +105,17 @@ instanciateFunc' fx ft = do
               PolyType _ rft -> do
                 let mF' = runTyping $ do
                             unify rft ft
-                            realize $ f { fType = MonoType ft }
+                            ft' <- generalize =<< realize ft
+                            realize $ f { fType = ft' }
                 case mF' of
                   Left err -> error $ "Failed to instanciate "
                     ++ (show fx) ++ " as " ++ (show ft)
                     ++ ": " ++ (show err)
                   Right f' -> do
-                    let fx' = (fName f') `suffixId` (T.append "_" $ encodeType $ MonoType ft)
+                    let fx' = (fName f') `suffixId` (T.append "_" $ encodeType $ fType f')
+                    modify (\s -> s { mstFuncInsts = M.insert (fx, ft) f' { fName = fx' } (mstFuncInsts s) })
                     f'' <- monoFunction $ f' { fName = fx' }
-                    modify (\s -> s { mstFuncInsts = M.insert (fx', ft) f'' (mstFuncInsts s) })
+                    modify (\s -> s { mstFuncInsts = M.insert (fx, ft) f'' (mstFuncInsts s) })
                     return $ Just fx'
 
 instanciateFunTy :: [TyVar] -> [Type] -> Type -> Mono TypeDef
@@ -121,7 +125,7 @@ instanciateFunTy fvs ts rt = do
   case M.lookup t tis of
     Nothing -> do
       let t' = if null fvs then MonoType t else PolyType fvs t
-      let td = TypeDef (mkId $ encodeType t') [] $ TBAlias $ TFun ts rt
+      let td = TypeDef (mkId $ encodeType t') [] S.empty $ TBAlias $ TFun ts rt
       modify (\s -> s { mstTypeInsts = M.insert t td $ mstTypeInsts s })
       return td
     Just td -> return td
@@ -158,10 +162,10 @@ monoTypeDef td = do
       return td'
 
 monoTypeDef' :: TypeDef -> Mono TypeDef
-monoTypeDef' td@(TypeDef _ _ (TBAlias t)) = do
+monoTypeDef' td@(TypeDef _ _ _ (TBAlias t)) = do
   t' <- monoType t
   return $ td { tdBody = TBAlias t' }
-monoTypeDef' td@(TypeDef _ _ (TBConses cs)) = do
+monoTypeDef' td@(TypeDef _ _ _ (TBConses cs)) = do
   cs' <- mapM monoTypeCons cs
   return $ td { tdBody = TBConses cs' }
   where
@@ -208,7 +212,9 @@ monoExpr e =
     _ -> return e
   where
     monoName :: (Type -> Ident -> TExpr) -> Type -> Ident -> Mono TExpr
-    monoName c t x = c <$> (monoType t) <*> (tryInstanciateFunc x t)
+    monoName c t x = do
+      t' <- monoType' t
+      (c t') <$> (tryInstanciateFunc x t)
 
 captureNewDeps :: Mono a -> Mono (a, Set Ident)
 captureNewDeps m = do
@@ -254,7 +260,14 @@ monoBinding b@(Binding { bBody = Fun f }) = do
 orderTypeDefs :: [TypeDef] -> [TypeDef]
 orderTypeDefs tds =
   let tdGraph = map (\td -> (td, tdName td, S.toList $ typeDeps td)) tds
-  in flattenSCCs $ stronglyConnComp tdGraph
+  in annotateRecGroups $ stronglyConnComp tdGraph
+  where
+    annotateRecGroups [] = []
+    annotateRecGroups ((NECyclicSCC xs0):sccs) =
+      let xs = NE.toList xs0
+      in map (\td -> td { tdRecursionGroup = (S.fromList $ map tdName xs) }) xs
+           ++ (annotateRecGroups sccs)
+    annotateRecGroups ((AcyclicSCC x):sccs) = x:(annotateRecGroups sccs)
 
 orderBindings :: [TBinding] -> [TBinding]
 orderBindings bs =

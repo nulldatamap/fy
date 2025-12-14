@@ -16,7 +16,6 @@ import Prelude hiding (lookup, lines)
 import Data.Text (Text)
 import Data.Set (Set)
 import qualified Data.Set as S
-import Prettyprinter
 
 data Publicity = Private
                | Public
@@ -166,7 +165,7 @@ instance Substitutable TypeDef where
   subst s (TypeDef n ps b) = TypeDef n (map (subst s) ps) $ subst s b
 
 instance Substitutable (Module Type) where
-  subst s m@(Module { mTypeDefs = ts, mItems = bs }) =
+  subst s m@(Module { mItems = bs }) =
     m { mItems = map (subst s) bs }
 
 class TypeDeps a where
@@ -188,7 +187,6 @@ instance TypeDeps TypeBody where
 
 instance TypeDeps TypeDef where
   typeDeps (TypeDef _ _ b) = typeDeps b
-
 
 bindingFromFunction :: Function a -> Binding a
 bindingFromFunction f@(Function n t _ p d _) = Binding t n p d (Fun f)

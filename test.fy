@@ -17,11 +17,11 @@ Test
         | Foo2 Bar Bar
         | Foone
 
-. main () = if $$eq () ()
-           then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) (Pos/Pos cool 3) 2)))
+. main () = if $$eq 1 1
+            then id (Foo/Foo2 (Bar/High (double (wooz () ($$eq 1 2) (Pos/Pos cool 3) 2)))
                              (Bar/Low Opt/None))
-                | (Foo/Foo2 (Bar/High x) z) -> x
-           else second MyBool/True -100
+                 | (Foo/Foo2 (Bar/High x) z) -> x
+            else second MyBool/True -100
 . double x = $$add x x
 . id x = x
 . wooz a b c d = 3

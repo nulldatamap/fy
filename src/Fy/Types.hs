@@ -4,10 +4,9 @@ module Fy.Types
      , Context(..)
      , mkId, suffixId, canonicalId, enumeratedIds
      , unnamedFields, variantField, typeName
-     , builtinTypeNames, isBuiltinType
+     , builtinTypeNames, isBuiltinType, bare
      , encodeType, unFn, isFnTy, tUnit, tInt, tBool
      ) where
-
 
 import Prelude hiding (lookup, lines)
 import GHC.Generics (Generic)
@@ -20,7 +19,6 @@ import Data.List (intercalate, elemIndex)
 import Data.Maybe (fromMaybe)
 import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
-import Prettyprinter
 
 data Ident = Ident { idName :: Text
                    , idNamespace :: [Text]
@@ -132,6 +130,9 @@ instance Semigroup Ident where
 mkId :: Text -> Ident
 mkId x = Ident x [] Nothing
 
+bare :: Ident -> Ident
+bare (Ident x _ _) = Ident x [] Nothing
+
 suffixId :: Ident -> Text -> Ident
 suffixId (Ident x ns i) s = Ident (T.append x s) ns i
 
@@ -164,11 +165,11 @@ tBool = TCons (mkId "bool") []
 tUnit :: Type
 tUnit = TCons (mkId "()") []
 
-builtinTypeNames :: [Text]
-builtinTypeNames = ["int", "bool", "9"]
+builtinTypeNames :: [Ident]
+builtinTypeNames = map mkId ["int", "bool", "()"]
 
 isBuiltinType :: Type -> Bool
-isBuiltinType (TCons (Ident x [] Nothing) []) = x `elem` builtinTypeNames
+isBuiltinType (TCons x []) = x `elem` builtinTypeNames
 isBuiltinType _ = False
 
 unFn :: Type -> Maybe ([Type], Type)

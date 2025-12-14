@@ -237,6 +237,9 @@ checkTypeDef td = do
 
 checkTypeDef' :: TypeDef -> Naming TypeDef
 checkTypeDef' td@(TypeDef _ _ (TBCType _)) = return td
+checkTypeDef' td@(TypeDef _ _ (TBAlias t)) = do
+  t' <- checkType [] t
+  return $ td { tdBody = TBAlias t' }
 checkTypeDef' (TypeDef tn tPrms (TBConses cs)) = do
   cs' <- mapM checkAndIntroCons cs
   return $ TypeDef tn (take (length tPrms) $ map TVar [0 :: Int ..]) (TBConses cs')

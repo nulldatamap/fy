@@ -7,11 +7,13 @@ import Fy.Types
 import Fy.Ast
 import Fy.Ir
 
+import Prelude hiding (init)
 import Data.Text (Text)
 import Data.Set (Set)
 import qualified Data.Set as S
 import Prettyprinter
 import Prettyprinter.Render.Terminal
+
 
 type CDoc = Doc AnsiStyle
 
@@ -39,7 +41,7 @@ ccn :: CDoc -> CDoc
 ccn = annotate $ color Red
 
 clc :: CDoc -> CDoc
-clc = annotate $ colorDull White
+clc = annotate $ color Blue
 
 cgl :: CDoc -> CDoc
 cgl = annotate $ color White
@@ -99,7 +101,7 @@ prettyDeps deps =
     go (x0:x1:xs) = (cpretty x0) <> "," <> (go $ x1:xs)
 
 instance (Show t, TypeAnn t) => CPretty (Binding t) where
-  cpretty (Binding t n pub deps b) =
+  cpretty (Binding _ n _ deps b) =
     case b of
       Val e -> "." <+> (align $ sep $ [cdf $ cpretty n]
                                         ++ prettyDeps deps
@@ -107,7 +109,7 @@ instance (Show t, TypeAnn t) => CPretty (Binding t) where
       Fun f -> "." <+> cpretty f
 
 instance (Show t, TypeAnn t) => CPretty (Function t) where
-  cpretty (Function n t args pub deps b) =
+  cpretty (Function n t args _ deps b) =
     align $ sep $ [(hsep $ (cdf $ cpretty n):argsDoc) `prettyTypeAnn` t]
                     ++ prettyDeps deps
                     ++ [nst $ sep ["=", cpretty b]]
@@ -144,7 +146,7 @@ instance (Show t, TypeAnn t) => CPretty (Expr t) where
   cpretty (EBuiltin _ b) = cpretty b
   cpretty (EIdent t x) = (clc $ cpretty x) `prettyTypeAnn` t
   cpretty (EApp t e es) = (parens $ hng $ sep $ map (group . cpretty) (e:es)) `prettyTypeAnn` t
-  cpretty (ELet t bs e) = parens $ align $ sep $ (cpretty e) : (map cpretty bs)
+  cpretty (ELet _ bs e) = parens $ align $ sep $ (cpretty e) : (map cpretty bs)
   cpretty (EIf t e0 e1 e2) = align $ vsep [ (ckw "if") <+> (cpretty e0)
                                           , (ckw "then") <+> (hng $ cpretty e1)
                                           , (ckw "else") <+> (hng $ cpretty e2) ] `prettyTypeAnn` t
@@ -162,8 +164,8 @@ instance CPretty PathItem where
           Just x -> ["=" <+> (cpretty x)]
       path :: CDoc
       path = go ps h ""
-      go (p0:p1:ps') h r = go (p1:ps') h (r <> (cpretty p0) <> "/")
-      go (p:ps') h r = go ps' h (r <> (cpretty p))
+      go (p0:p1:ps') hd r = go (p1:ps') hd (r <> (cpretty p0) <> "/")
+      go (p:ps') hd r = go ps' hd (r <> (cpretty p))
       go [] Nothing r = r
       go [] (Just Nothing) r = r <> "/*"
       go [] (Just (Just ns)) r = r <> "/" <> (tupled $ map cpretty ns)
@@ -224,10 +226,11 @@ instance CPretty IRExpr where
   cpretty (IRVar x) = clc $ cpretty x
   cpretty (IROp o es) = (cbi $ cpretty o) <> (tupled $ map cpretty es)
   cpretty (IRCall x es) = (cgl $ cpretty x) <> (tupled $ map cpretty es)
+  cpretty (IRUnbox e) = (ckw "unbox") <> (parens $ cpretty e)
   cpretty (IRCons t x es) = (ccn $ (cpretty t) <> "/" <> (cpretty x)) <> (tupled $ map cpretty es)
   cpretty (IRLit l) = cpretty l
   cpretty (IRField e x) = (cpretty e) <> "." <> (cpretty x)
-  cpretty (IRCheckVariant e x y) = (ccn $ (cpretty x) <> "/" <> (cpretty y) <> "?") <+> (cpretty e)
+  cpretty (IRCheckVariant e x) = (ccn $ (cpretty x) <> "?") <+> (cpretty e)
 
 instance CPretty IRStmt where
   cpretty (IRDef t n mX) = hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t] ++ xDoc
@@ -238,6 +241,8 @@ instance CPretty IRStmt where
           Just x -> ["=" <+> (cpretty x)]
   cpretty (IRSet x e) = hsep $ [clc $ cpretty x, "<-", cpretty e]
   cpretty (IREval e) = cpretty e
+  cpretty (IRBox t n e) =
+    hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t,  "=", ckw "box", cpretty e]
   cpretty (IRReturn e) = hsep $ [ckw "return", cpretty e]
   cpretty (IRIf e0 st0 [th@(IRIf _ _ _)]) =
     hsep $ [ ckw "if", cpretty e0
@@ -257,6 +262,7 @@ instance CPretty IRFunc where
 
 instance CPretty IRType where
   cpretty (IRType t) = cty $ cpretty t
+  cpretty IRBoxType = cbi "$$BOX-TYPE"
 
 instance CPretty IRVarDecl where
   cpretty (IRVarDecl n _ t) = (ckw "var") <+> (cpretty n) <+> ":" <+> (cpretty t)

@@ -19,6 +19,7 @@ data Operator = OpAdd
               deriving (Show, Eq)
 
 data IRType = IRType Ident
+            | IRBoxType
   deriving (Show, Eq)
 
 data IRRecord = IRRecord Ident [(IRType, Ident)]
@@ -48,11 +49,13 @@ data IRExpr = IRVar Ident
             | IRCall Ident [IRExpr]
             | IRCons IRType Ident [IRExpr]
             | IRLit IRLit
+            | IRUnbox IRExpr
             | IRField IRExpr Ident
-            | IRCheckVariant IRExpr Ident Ident
+            | IRCheckVariant IRExpr Ident
             deriving (Show)
 
 data IRStmt = IRDef IRType Ident (Maybe IRExpr)
+            | IRBox IRType Ident IRExpr
             | IRSet Ident IRExpr
             | IREval IRExpr
             | IRReturn IRExpr

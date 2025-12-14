@@ -75,7 +75,11 @@ emitProgram p = runEmitter $ withTypes (irpTypes p) $ do
         , "#include <stdbool.h>"
         , "#include <stdlib.h>"
         , ""
+        , "typedef struct {} __fy_unit;"
+        , "#define __FY_UNIT ((__fy_unit){})"
+        , ""
         , "void* __fy_alloc(size_t sz) { return malloc(sz); }"
+        , "#define ALLOC(__ARG_t, __ARG_x, __ARG_v) __ARG_t __ARG_x = (__ARG_t)__fy_alloc(sizeof(*__ARG_x)); *__ARG_x = __ARG_v;"
         ]
   emitTypeDefs $ irpTypes p
   mapM_ emitVarDecl $ irpVars p
@@ -151,6 +155,11 @@ emitStmt (IRDef t x mE) = do
   mapM_ (\e -> (emit " = ") >> emitExpr e) mE
   emit ";"
 emitStmt (IRSet x e) = (emitIdent x) >> (emit " = ") >> (emitExpr e) >> (emit ";")
+emitStmt (IRBox t x e) = do
+  emit "ALLOC"
+  parens $ (emitType t) >> (emit ", ") >> (emitIdent x) >> (emit ", ") >> (emitExpr e)
+  emit ";"
+
 emitStmt (IREval e) = (emitExpr e) >> (emit ";")
 emitStmt (IRReturn e) = (emit "return ") >> (emitExpr e) >> (emit ";")
 emitStmt (IRIf e0 sts1 sts2) = do
@@ -173,44 +182,39 @@ chainedOp True _ _ [x] = emitExpr (x)
 chainedOp False op _ [x] = error $ "Can't use chained op `" ++ (show op) ++ "` with only one argument: " ++ (show x)
 chainedOp _ op _ xs = seperated op emitExpr xs
 
-isTypeBoxed :: IRType -> Emitter Bool
-isTypeBoxed (IRType tn) = do
-  tys <- estTypes <$> ask
-  case M.lookup tn tys of
-    Nothing -> error $ "Unreolved type: " ++ (show tn)
-    Just t -> return $ irtdIsBoxed t
-
 emitExpr :: IRExpr -> Emitter ()
 emitExpr (IRVar x) = emitIdent x
 emitExpr (IRLit l) =
   case l of
     IRInt x -> emit $ T.pack $ show x
-    IRVoid -> emit "/*void*/"
+    IRVoid -> emit "__FY_UNIT"
 emitExpr (IROp OpAnd xs) = chainedOp True " && " "1" xs
 emitExpr (IROp OpEq xs) = chainedOp False " == " "1" xs
 emitExpr (IROp o [x, y]) =
     case o of
         OpAdd -> parens ((emitExpr x) >> (emit " + ") >> (emitExpr y))
 emitExpr e@(IROp _ _) = error $ "Invalid operator: " ++ (show e)
-emitExpr (IRCons t x es) = do
-  isBoxed <- isTypeBoxed t
-  let go = if isBoxed then (\m -> emit "BOX" >> (parens m)) else id
-  go $ do
-    emit "MK_"
-    emitIdent' x
-    parens $ seperated ", " emitExpr es
+emitExpr (IRCons (IRType tn) x es) = do
+  emit "MK_"
+  emitIdent' tn
+  emit "_"
+  emitIdent' x
+  parens $ seperated ", " emitExpr es
+emitExpr (IRCons t _ _) = error $ "Invalid cons type: " ++ (show t)
+emitExpr (IRUnbox e) = parens $ emit "*" >> emitExpr e
 emitExpr (IRCall x es) = do
   emitIdent x
   parens $ seperated ", " emitExpr es
 emitExpr (IRField e f) = do
-  let mParen = case e of
-                 IRField _ _ -> id
-                 IRVar _     -> id
-                 _           -> parens
-  mParen $ emitExpr e
-  emit "."
+  let (mParen, s, e') = case e of
+                          IRField _ _ -> (id, ".", e)
+                          IRVar _     -> (id, ".", e)
+                          IRUnbox e0  -> (id, "->", e0)
+                          _           -> (parens, ".", e)
+  mParen $ emitExpr e'
+  emit s
   emitIdent' f
-emitExpr (IRCheckVariant e _ v) = do
+emitExpr (IRCheckVariant e v) = do
   parens $ do
     emitExpr (IRField e variantField)
     emit " == "
@@ -225,16 +229,16 @@ emitIdent x = emit "__" >> (emit $ canonicalId x)
 emitType :: IRType -> Emitter ()
 emitType (IRType (Ident "int" [] Nothing)) = emit "int"
 emitType (IRType (Ident "bool" [] Nothing)) = emit "bool"
-emitType (IRType (Ident "()" [] Nothing)) = emit "void"
+emitType (IRType (Ident "()" [] Nothing)) = emit "__fy_unit"
 emitType (IRType x) = emitIdent x
--- emitType t = error $ "Unsupported type: " ++ (show t)
+emitType IRBoxType = emit "void*"
 
 emitEnum :: Ident -> Bool -> [Ident] -> Emitter ()
 emitEnum t isVariant vs = do
     indent
     emit "typedef enum "
     braceBlock $ do
-      mapM_ (\n -> indent >> (emitIdent $ n) >> line ",") vs
+      mapM_ (\n -> indent >> (emitIdent t) >> (emit "_") >> (emitIdent' $ n) >> line ",") vs
     emit " "
     emitIdent t
     when isVariant $ emit "__variant"
@@ -243,6 +247,9 @@ emitStruct' :: Bool -> Ident -> IRRecord -> Bool -> Emitter ()
 emitStruct' isField n (IRRecord _ fs) isBoxed = do
   indent
   emit "struct "
+  when isBoxed $ do
+    emitIdent n
+    emit "_unboxed "
   braceBlock $ do
       mapM_ (\(t, f) -> do
               indent
@@ -280,6 +287,9 @@ emitTypeDef (IRTypeDef t _ isBoxed b) = do
       emitEnum t True $ map (\(IRRecord v _) -> v) rs
       indent
       emit "typedef struct "
+      when isBoxed $ do
+        emitIdent t
+        emit "_unboxed "
       braceBlock $ do
         indent
         emitIdent t
@@ -302,43 +312,67 @@ emitTypeDef (IRTypeDef t _ isBoxed b) = do
       parens $ emit "*" >> emitIdent t
       parens $ seperated ", " emitType ts
       line ";"
+    IRTypeAlias at -> do
+      emit "typedef "
+      emitType at
+      emit " "
+      emitIdent t
+      line ";"
 
 emitConses :: IRTypeDef -> Emitter ()
-emitConses (IRTypeDef tn _ _ b) =
+emitConses (IRTypeDef tn _ isBoxed b) =
   case b of
     IRFunType _ _ -> return ()
     IRCType _ -> return ()
+    IRTypeAlias _ -> return ()
     IREnumType variants -> do
         mapM_ (\v -> do
                     emit "#define MK_"
+                    emitIdent' tn
+                    emit "_"
                     emitIdent' v
                     emit "() "
-                    emitIdent $ v
+                    emitIdent tn
+                    emit "_"
+                    emitIdent' $ v
                     line "") variants
         line ""
     IRStructType (IRRecord c fs) -> do
         emit "#define MK_"
+        emitIdent' tn
+        emit "_"
         emitIdent' c
         let args = take (length fs) $ enumeratedIds "__arg"
         parens $ seperated ", " emitIdent' args
         emit " "
-        parens $ emitIdent tn
+        parens $ innerTn
         emit " {"
         seperated ", " emitIdent' args
         line " }\n"
     IRTaggedType rs -> mapM_ emitCons rs >> line ""
   where
+    innerTn =
+      if isBoxed
+      then do
+        emit "struct "
+        emitIdent tn
+        emit "_unboxed"
+      else emitIdent tn
     emitCons (IRRecord c fs) = do
       emit "#define MK_"
+      emitIdent' tn
+      emit "_"
       emitIdent' c
       let args = take (length fs) $ enumeratedIds "__arg"
       parens $ seperated ", " emitIdent' args
       emit " "
-      parens $ emitIdent tn
+      parens $ innerTn
       emit " {."
       emitIdent' variantField
       emit " = "
-      emitIdent $ c
+      emitIdent tn
+      emit "_"
+      emitIdent' c
       emit ", ."
       emitIdent' c
       emit " = {"

@@ -67,6 +67,7 @@ data IRFunc = IRFunc { irfName  :: Ident
                      , irfPub   :: Publicity
                      , irfRetTy :: IRType
                      , irfArgs  :: [(Ident, IRType)]
+                     , irfDeps  :: Set Ident
                      , irfBody  :: [IRStmt] }
             deriving (Show)
 

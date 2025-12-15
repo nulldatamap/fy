@@ -257,7 +257,7 @@ instance CPretty IRStmt where
 
 
 instance CPretty IRFunc where
-  cpretty (IRFunc n _ ret args b) =
+  cpretty (IRFunc n _ ret args _ b) =
     (ckw "func") <+> (cdf $ cpretty n) <> argsDoc <+> "->" <+> (cpretty ret) <+> (block $ map cpretty b)
      where
        argsDoc = tupled $ map (\(x, t) -> (clc $ cpretty x) <+> ":" <+> (cpretty t)) args

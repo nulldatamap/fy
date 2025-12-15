@@ -20,7 +20,8 @@ import Data.Graph (stronglyConnComp, flattenSCCs, SCC(..))
 data MonoSt = MonoSt { mstKnownTypes :: M.HashMap Ident TypeDef
                      , mstTypeInsts  :: M.HashMap Type TypeDef
                      , mstKnownFuncs :: M.HashMap Ident TFunction
-                     , mstFuncInsts  :: M.HashMap (Ident, Type) TFunction }
+                     , mstFuncInsts  :: M.HashMap (Ident, Type) TFunction
+                     , mstDeps :: Set Ident }
 
 type Mono = State MonoSt
 
@@ -30,7 +31,8 @@ runMono m = evalState m $
   MonoSt { mstKnownTypes = M.empty
          , mstTypeInsts  = M.empty
          , mstKnownFuncs = M.empty
-         , mstFuncInsts  = M.empty }
+         , mstFuncInsts  = M.empty
+         , mstDeps = S.empty }
 
 registerFun :: TFunction -> Mono ()
 registerFun f =
@@ -180,10 +182,12 @@ monoPat (PCons t c ps) = PCons <$> (monoType t) <*> (return c) <*> (mapM monoPat
 monoPat p = return p
 
 monoCase :: TCase -> Mono TCase
-monoCase (Case p bs e) =
-  Case <$> (monoPat p)
-       <*> (mapM (\(x, t) -> ((,) x) <$> (monoType t)) bs)
-       <*> (monoExpr e)
+monoCase (Case p bs e) = do
+  p' <- monoPat p
+  bs' <- mapM (\(x, t) -> ((,) x) <$> (monoType t)) bs
+  e' <- monoExpr e
+  modify (\s -> s { mstDeps = (mstDeps s) S.\\ (S.fromList $ map fst bs) })
+  return $ Case p' bs' e'
 
 monoExpr :: TExpr -> Mono TExpr
 monoExpr e =
@@ -214,18 +218,9 @@ monoExpr e =
     monoName :: (Type -> Ident -> TExpr) -> Type -> Ident -> Mono TExpr
     monoName c t x = do
       t' <- monoType' t
-      (c t') <$> (tryInstanciateFunc x t)
-
-captureNewDeps :: Mono a -> Mono (a, Set Ident)
-captureNewDeps m = do
-  oldInsts <- getInstNames
-  r <- m
-  curInsts <- getInstNames
-  let newInsts = curInsts S.\\ oldInsts
-  return (r, newInsts)
-  where
-    getInstNames :: Mono (Set Ident)
-    getInstNames = (S.fromList . (map fst) . M.keys . mstFuncInsts) <$> get
+      x' <- tryInstanciateFunc x t
+      modify (\s -> s { mstDeps = S.insert x' $ mstDeps s })
+      return $ c t' x'
 
 -- Handles type schemes, but doesn't alias the toplevel function type
 monoSignature :: TypeScheme -> Mono TypeScheme
@@ -234,24 +229,32 @@ monoSignature sig =
     MonoType t -> MonoType <$> (monoType' t)
     PolyType xs t -> (PolyType xs) <$> (monoType' t)
 
+captureNewDeps :: Mono a -> Mono (a, Set Ident)
+captureNewDeps m = do
+  oldDeps <- mstDeps <$> get
+  modify (\s -> s { mstDeps = S.empty })
+  r <- m
+  newDeps <- mstDeps <$> get
+  modify (\s -> s { mstDeps = oldDeps })
+  return (r, newDeps)
+
 monoFunction :: TFunction -> Mono TFunction
 monoFunction f = do
-  -- The functions that got instantiated while processing the body should
-  -- Become dependencies of this function
-  (e', newInsts) <- captureNewDeps $ monoExpr $ fBody f
   t' <- monoSignature $ fType f
+  (e', newDeps) <- captureNewDeps $ monoExpr $ fBody f
   args' <- mapM (\(x, t) -> ((,) x) <$> (monoType t)) $ fArgs f
+
   return $ f { fBody = e'
              , fType = t'
              , fArgs = args'
-             , fDeps = S.union (fDeps f) newInsts }
+             , fDeps = newDeps S.\\ (S.fromList $ map fst $ fArgs f) }
 
 monoBinding :: TBinding -> Mono TBinding
 monoBinding b@(Binding { bBody = Val e, bType = t }) = do
   t' <- monoSignature t
   (e', newDeps) <- captureNewDeps $ monoExpr e
   return $ b { bBody = Val e'
-             , bDeps = S.union newDeps (bDeps b)
+             , bDeps = newDeps
              , bType = t' }
 monoBinding b@(Binding { bBody = Fun f }) = do
   f' <- monoFunction f

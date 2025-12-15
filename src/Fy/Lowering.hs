@@ -27,7 +27,6 @@ data LoweringSt = LoweringSt { lstNext  :: Int
 
 type Lowering = RWS () [IRStmt] LoweringSt
 
-
 data IRTypeKind = IRTDef IRTypeDef
                 | IRTBox
                 | IRTBuiltin Ident
@@ -312,6 +311,7 @@ lowerFunction f = do
                   , irfPub   = fPub f
                   , irfRetTy = retT'
                   , irfArgs  = argsTs
+                  , irfDeps  = fDeps f
                   , irfBody  = body }
   modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
   return f'

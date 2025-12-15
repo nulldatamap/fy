@@ -8,20 +8,25 @@ import Fy.Ir
 
 import Prelude hiding (lookup, lines)
 import Data.Text (Text)
-import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
+import Data.Set (Set)
+import qualified Data.Set as S
+import qualified Data.HashMap.Strict as M
 import Data.List (intersperse)
 import Control.Monad (when)
 import Control.Monad.RWS
 
-data EmitterSt = EmitterSt { estIndentation :: Int
-                           , estTypes :: M.HashMap Ident IRTypeDef }
+data EmitterSt = EmitterSt {  estSeenNames :: Set Ident }
 
-type Emitter a = RWS EmitterSt [Text] () a
+data EmitterEnv = EmitterEnv { estIndentation :: Int
+                             , estTypes :: M.HashMap Ident IRTypeDef
+                             , estFuncs :: M.HashMap Ident IRFunc }
+
+type Emitter a = RWS EmitterEnv [Text] EmitterSt a
 
 
 runEmitter :: Emitter () -> Text
-runEmitter m = T.concat $ snd $ evalRWS m (EmitterSt 0 M.empty) ()
+runEmitter m = T.concat $ snd $ evalRWS m (EmitterEnv 0 M.empty M.empty) (EmitterSt S.empty)
 
 indented :: Emitter a -> Emitter a
 indented m = local (\st -> st { estIndentation = 1 + estIndentation st }) m
@@ -65,12 +70,13 @@ braceBlock m = do
   emit "}"
   return r
 
-withTypes :: [IRTypeDef] -> Emitter a -> Emitter a
-withTypes tds m =
-  local (\s -> s { estTypes = M.fromList $ map (\td -> (irtdName td, td)) tds }) m
+withTypesAndFuncs :: IRProgram -> Emitter a -> Emitter a
+withTypesAndFuncs p m =
+  local (\s -> s { estTypes = M.fromList $ map (\td -> (irtdName td, td)) $ irpTypes p
+                 , estFuncs = M.fromList $ map (\f -> (irfName f, f)) $ irpFuncs p }) m
 
 emitProgram :: IRProgram -> Text
-emitProgram p = runEmitter $ withTypes (irpTypes p) $ do
+emitProgram p = runEmitter $ withTypesAndFuncs p $ do
   lines [ "#include <stdio.h>"
         , "#include <stdbool.h>"
         , "#include <stdlib.h>"
@@ -84,6 +90,7 @@ emitProgram p = runEmitter $ withTypes (irpTypes p) $ do
   emitTypeDefs $ irpTypes p
   mapM_ emitVarDecl $ irpVars p
   line ""
+  modify (\s -> s { estSeenNames = S.empty })
   mapM_ emitFunction $ irpFuncs p
   emitModuleInitializer (irpName p) $ irpInit p
   emit "\nint main(int argc, const char** argv)"
@@ -130,18 +137,29 @@ emitTypeDefs tds =
     tds
 
 emitFunction  :: IRFunc -> Emitter ()
-emitFunction f = do
+emitFunction f@(IRFunc { irfName = n, irfDeps = deps }) = do
+    preDecl <- ((S.delete n) . (deps S.\\) . estSeenNames) <$> get
+    fs <- estFuncs <$> ask
+    mapM_ (\d -> do
+              case M.lookup d fs of
+                Nothing -> return ()
+                Just f0 -> (emitSignature f0) >> (line ";"))
+      preDecl
+    modify (\s -> s { estSeenNames = S.insert n $ S.union deps (estSeenNames s) })
     indent
-    fn' <- emitItemExport (irfPub f) (irfName f)
-    emitType $ irfRetTy f
-    emit " "
-    emitIdent fn'
-    parens $ do
-      seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) $ irfArgs f
+    emitSignature f
     emit " "
     braceBlock $ do
       emitStmts $ irfBody f
     emit "\n\n"
+  where
+    emitSignature f0 = do
+      fn <- emitItemExport (irfPub f0) (irfName f0)
+      emitType $ irfRetTy f0
+      emit " "
+      emitIdent fn
+      parens $ do
+        seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) $ irfArgs f0
 
 emitStmts :: [IRStmt] -> Emitter ()
 emitStmts [] = return ()
@@ -233,12 +251,12 @@ emitType (IRType (Ident "()" [] Nothing)) = emit "__fy_unit"
 emitType (IRType x) = emitIdent x
 emitType IRBoxType = emit "void*"
 
-emitType' :: Ident -> IRType -> Emitter ()
-emitType' n t =
+emitType' :: Set Ident -> IRType -> Emitter ()
+emitType' ns t =
   case t of
-    IRType tn | tn == n -> do
+    IRType tn | tn `S.member` ns -> do
       emit "struct "
-      emitIdent n
+      emitIdent tn
       emit "_unboxed*"
     _ -> emitType t
 
@@ -252,17 +270,17 @@ emitEnum t isVariant vs = do
     emitIdent t
     when isVariant $ emit "__variant"
     line ";\n"
-emitStruct' :: Ident -> Bool -> Ident -> IRRecord -> Bool -> Emitter ()
-emitStruct' tn isField n (IRRecord _ fs) isBoxed = do
+emitStruct' :: Set Ident -> Bool -> Ident -> IRRecord -> Bool -> Emitter ()
+emitStruct' ns isField n (IRRecord _ fs) isBoxed = do
   indent
   emit "struct "
   when isBoxed $ do
-    emitIdent tn
+    emitIdent n
     emit "_unboxed "
   braceBlock $ do
       mapM_ (\(t, f) -> do
               indent
-              emitType' tn t
+              emitType' ns t
               emit " "
               emitIdent' f
               line ";")
@@ -274,11 +292,14 @@ emitStruct' tn isField n (IRRecord _ fs) isBoxed = do
   else emitIdent n
   line ";"
 
-emitStruct :: Ident -> IRRecord -> Bool -> Emitter ()
-emitStruct n r isBoxed = emitStruct' n False n r isBoxed
+emitStruct :: Set Ident -> Ident -> IRRecord -> Bool -> Emitter ()
+emitStruct rg n r isBoxed = emitStruct' rg False n r isBoxed
 
 emitTypeDef :: IRTypeDef -> Emitter ()
-emitTypeDef (IRTypeDef t _ isBoxed b) = do
+emitTypeDef (IRTypeDef t rg isBoxed b) = do
+  preDecl <- ((S.delete t) . (rg S.\\) . estSeenNames) <$> get
+  mapM_ (\n -> (emit "struct ") >> (emitIdent n) >> (line "_unboxed;")) preDecl
+  modify (\s -> s { estSeenNames = S.union rg $ estSeenNames s })
   case b of
     IRCType ct -> do
       emit "typedef "
@@ -289,7 +310,7 @@ emitTypeDef (IRTypeDef t _ isBoxed b) = do
       line ";\n"
     IRStructType r -> do
       emit "typedef "
-      emitStruct t r isBoxed
+      emitStruct rg t r isBoxed
       line ""
     IREnumType variants -> emitEnum t False variants
     IRTaggedType rs -> do
@@ -308,7 +329,7 @@ emitTypeDef (IRTypeDef t _ isBoxed b) = do
         indent
         emit "union "
         braceBlock $
-          mapM_ (\r@(IRRecord c _) -> emitStruct' t True c r False) rs
+          mapM_ (\r@(IRRecord c _) -> emitStruct' rg True c r False) rs
         line ";"
       when isBoxed $ emit "*"
       emit " "

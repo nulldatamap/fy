@@ -97,6 +97,7 @@ data Expr t = ELit t Lit
             | ELet t [Binding t] (Expr t)
             | EIf t (Expr t) (Expr t) (Expr t)
             | ECase t (Expr t) [Case t]
+            | ELam t [(Ident, t)] (Expr t)
             -- Never parsed:
             | ELocal t Ident
             -- | ECapture t Ident
@@ -129,6 +130,7 @@ instance Typed Expr where
   withType f x@(EBuiltin t _) = f t x
   withType f x@(EApp t _ _) = f t x
   withType f x@(ELet t _ _) = f t x
+  withType f x@(ELam t _ _) = f t x
   withType f x@(EIf t _ _ _) = f t x
   withType f x@(ECase t _ _) = f t x
   withType f x@(ETup t _) = f t x

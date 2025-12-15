@@ -77,7 +77,7 @@ irPass n p out err =
               _ -> error $ "Expect ir input for pass: " ++ (show n))
 
 -- TODO:
--- - Deal with non-function bindings
+-- - Type annotations
 -- - Type parameter usage (for types)
 -- - Source locations
 -- - Error context
@@ -86,10 +86,8 @@ irPass n p out err =
 -- - Guards?
 -- - Zero types
 -- - Tuples
+-- - Records
 -- - @-patterns
--- - Function pointer types
--- - Boxed types
--- - Toplevel functions?
 -- - Lambdas
 -- - Closures
 -- - "Effects"

@@ -154,6 +154,9 @@ instance (Show t, TypeAnn t) => CPretty (Expr t) where
   cpretty (ELocal t x) = (clc $ cpretty x) `prettyTypeAnn` t
   cpretty (EGlobal t x) = (cgl $ cpretty x) `prettyTypeAnn` t
   cpretty (ECons t x) = parens $ (ccn $ cpretty x) `prettyTypeAnn` t
+  cpretty (ELam t xs e) =
+    (parens $ "\\" <> (align $ sep $ map (clc . cpretty . fst) xs) <+> "->" <+> (hng $ cpretty e))
+      `prettyTypeAnn` t
 
 instance CPretty PathItem where
   cpretty (PathItem ps h alias) = hsep $ path : al

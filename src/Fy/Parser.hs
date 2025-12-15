@@ -97,9 +97,9 @@ pTermExpr =  ((ELit ()) <$> pLit)
       <|> pParenTupleOrUnit
       <|> ((EIdent ()) <$> pIdent)
       <|> ((EBuiltin ()) <$> pBuiltin)
-      <|> ((EIf ()) <$> ((symbol "if")   *> pCaseExpr)
-                    <*> ((symbol "then") *> pCaseExpr)
-                    <*> ((symbol "else"  *> pCaseExpr)))
+      <|> ((EIf ()) <$> ((symbol "if")   *> pNonLetExpr)
+                    <*> ((symbol "then") *> pNonLetExpr)
+                    <*> ((symbol "else"  *> pNonLetExpr)))
   where
     pParenTupleOrUnit = do
       es <- pParens $ pFullExpr `sepBy1` (symbol ",")
@@ -128,9 +128,17 @@ pCaseExpr = do
   where
     pCase = (\p e -> Case p [] e) <$> (symbol "|" *> pPat) <*> (symbol "->" *> pAppExpr)
 
+pLamExpr :: Parser UExpr
+pLamExpr = ((ELam ()) <$> ((`zip` (repeat ())) <$> (symbol "\\" *> pParams))
+                      <*> ((symbol "->") *> pCaseExpr))
+        <|> pCaseExpr
+
+pNonLetExpr :: Parser UExpr
+pNonLetExpr = pLamExpr
+
 pLetExpr :: Parser UExpr
 pLetExpr = do
-  e <- pCaseExpr
+  e <- pLamExpr
   bs <- many pBinding
   return $
     case bs of
@@ -140,12 +148,18 @@ pLetExpr = do
 pFullExpr :: Parser UExpr
 pFullExpr = pLetExpr
 
+pParams' :: Parser (Bool, [Ident])
+pParams' = (symbol "()" *> (return $ (False, [])))
+            <|> ((\as -> (null as, as)) <$> (many pIdent))
+
+pParams :: Parser ([Ident])
+pParams = snd <$> pParams'
+
 pBinding :: Parser UBinding
 pBinding = do
   x    <- symbol "." *> pIdent
-  (isV, args) <- (symbol "()" *> (return $ (False, [])))
-                  <|> ((\as -> (null as, as)) <$> (many pIdent))
-  body <- symbol "=" *> pCaseExpr
+  (isV, args) <- pParams'
+  body <- symbol "=" *> pNonLetExpr
   return $
     if isV
     then Binding (MonoType ()) x Private (S.empty) $ Val body

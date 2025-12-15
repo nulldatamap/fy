@@ -209,6 +209,7 @@ checkExpr e =
       e0' <- checkExpr e0
       cs' <- mapM checkCase cs
       return $ ECase () e0' cs'
+    ELam () xs e0 -> error "TODO: checkExpr ELam"
     _ -> return e
 
 checkFunction :: Ident -> [Ident] -> Publicity -> UExpr -> Naming UFunction

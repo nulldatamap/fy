@@ -1,18 +1,18 @@
 -- Same as lam.fy, but uses named functions instead
 Clo
 
-. main () = 0
+. main () = zero ()
 -- Syntax
 . zero () = 0
 . one x   = 1
 . inc x   = $$add x 1
-. const x y = x
+. constf x y = x
 -- Global usage
 . inc0 x = inc x
 -- Application
 . three = (id 3 . id x = x)
 -- Scoping/closure
-. holder = (x y z
+. holder = ($$add (z ()) (x y)
   . x z = $$add y z
   . y = 0
   . z () = $$add (one ()) y)

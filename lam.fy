@@ -11,7 +11,7 @@ Lam
 -- Application
 . three = (id 3 . id = \x -> x)
 -- Scoping/closure
-. holder = (x y z
+. holder = ($$add (z ()) (x y)
   . x = \z -> $$add y z
   . y = 0
   . z = \ -> $$add (one ()) y)

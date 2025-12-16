@@ -76,6 +76,9 @@ unify ty@(TCons x xs) tx@(TCons y ys) =
   if x == y && length xs == length ys
   then mapM_ (uncurry unify) $ zip xs ys
   else throwError $ UnificationError tx ty
+-- Special rule for nilary functions:
+unify (TFun [] x) (TFun [t0] y) | t0 == tUnit = unify x y
+unify (TFun [t0] x) (TFun [] y) | t0 == tUnit = unify x y
 unify fy@(TFun xs x) fx@(TFun ys y) =
   if length xs == length ys
   then do
@@ -133,9 +136,10 @@ inferFunction' f prmTys retTy = do
   e' <- scoped prms $ inferExpr $ fBody f
   unify (typeOf e') retTy
   fty <- realize $ TFun prmTys retTy
+  env' <- mapM (\(x,_ ) -> (\t -> (x, t)) <$> (typeOfName x)) $ fEnv f
   return $ Function { fName = fName f
                     , fType = MonoType fty
-                    , fEnv  = undefined -- TODO
+                    , fEnv  = env'
                     , fArgs = zip (map fst $ fArgs f) prmTys
                     , fPub  = fPub f
                     , fDeps = fDeps f
@@ -233,6 +237,7 @@ inferExpr :: UExpr -> Typing TExpr
 inferExpr (ELit _ l) = do
   t <- litType l
   return $ ELit t l
+inferExpr (ECapture _ x) = (\t -> ECapture t x) <$> (typeOfName x)
 inferExpr (ELocal _ x) = (\t -> ELocal t x) <$> (typeOfName x)
 inferExpr (EGlobal _ x) = (\t -> EGlobal t x) <$> (typeOfName x)
 inferExpr (ECons _ x) = (\t -> ECons t x) <$> (typeOfName x)
@@ -267,6 +272,16 @@ inferExpr (ECase _ e cs) = do
             unify (typeOf e0) rt)
     cs'
   return $ ECase rt e' cs'
+inferExpr (ELam _ xs deps caps e0) = do
+  prmTys <- mapM (const fresh) xs
+  let prms = map fst xs
+  let xs' = zipWith (\x t -> (x, MonoType t)) prms prmTys
+  caps' <- mapM (\(x, _) -> do
+                   t <- typeOfName x
+                   return (x, t)) caps
+  e0' <- scoped xs' $ inferExpr e0
+  return $ ELam (TFun prmTys (typeOf e0')) (zip prms prmTys) deps [] e0'
+
 inferExpr e = error $ "Type inference is not yet supported for: " ++ (show e)
 
 inferCase :: UCase -> Typing TCase

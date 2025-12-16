@@ -213,7 +213,8 @@ useOrCap x = do
   let doCap = case neKind ne of
                 NKLocal d | d /= curDepth -> True
                 _ -> False
-  if doCap then addCap n else addDep n
+  addDep n
+  when doCap $ addCap n
   return (doCap, ne)
 
 bubbleUpCaps :: Set Ident -> Naming ()
@@ -247,6 +248,7 @@ checkExpr e =
     ELam () xs _ _ e0 -> do
       ((xs', e0'), deps, caps) <- block $ scopedVars' (map fst xs) $ checkExpr e0
       bubbleUpCaps caps
+      mapM_ addDep deps
       return $ ELam () (zip xs' $ repeat ()) deps (zip (S.toList caps) $ repeat ()) e0'
     _ -> return e
 

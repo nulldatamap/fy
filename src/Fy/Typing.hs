@@ -125,7 +125,7 @@ introTypeCons ps t (TypeCons c ts) =
                                      _ -> error $ "Type definition parameter is not a type variable: " ++ (show pt))
                               ps)
                     ct
-  in modify (\s -> s { env = M.insert c ct' $ env s })
+  in insert c ct'
 
 inferFunction' :: UFunction -> [Type] -> Type -> Typing TFunction
 inferFunction' f prmTys retTy = do
@@ -266,7 +266,7 @@ inferExpr (ECase _ e cs) = do
             unify (typeOf e0) rt)
     cs'
   return $ ECase rt e' cs'
-inferExpr (ETup _ _) = error "Tuples are not supported yet"
+inferExpr e = error $ "Type inference is not yet supported for: " ++ (show e)
 
 inferCase :: UCase -> Typing TCase
 inferCase (Case p vs e) = do

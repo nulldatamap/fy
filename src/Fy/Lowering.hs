@@ -2,7 +2,6 @@ module Fy.Lowering
   ( lowerToIR
   ) where
 
-
 import Fy.Util
 import Fy.Types
 import Fy.Ast
@@ -18,8 +17,6 @@ import Control.Monad
 import Control.Monad.State
 import Control.Monad.RWS
 import qualified Data.HashMap.Strict as M
-
-import Debug.Trace (trace)
 
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
@@ -165,7 +162,7 @@ lowerFunType (TFun ts t) = (,) <$> (lowerType t) <*> (mapM lowerType ts)
 lowerFunType t = do
   td <- lookupTypeDef t
   case irtdBody td of
-    IRFunType t rt -> return (t, rt)
+    IRFunType ts rt -> return (ts, rt)
     _ -> error $ "Expected a function type: " ++ (show t)
 
 lowerExpr :: TExpr -> Lowering IRExpr
@@ -214,7 +211,7 @@ lowerExpr e =
     ECase t e0 cs -> do
       x <- spillExpr "_matchee" e0
       lowerCases x t cs
-    ETup _ _ -> error "Tuples are not supported yet"
+    _ -> error $ "Lowering is not yet supported for: " ++ (show e)
 
 lookupTypeDef :: Type -> Lowering IRTypeDef
 lookupTypeDef (TCons t _) = do

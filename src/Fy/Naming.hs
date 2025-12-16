@@ -58,10 +58,12 @@ uniqId (Ident x ns _) = do
 block :: Naming a -> Naming (a, Set Ident)
 block x = do
   oldSt <- get
-  modify (\s -> s { nstDeps = S.empty })
+  modify (\s -> s { nstDeps = S.empty
+                  , nstDepth = 1 + (nstDepth oldSt) })
   r <- x
   st <- get
-  modify (\s -> s { nstDeps = nstDeps oldSt })
+  modify (\s -> s { nstDeps = nstDeps oldSt
+                  , nstDepth = nstDepth oldSt })
   return (r, nstDeps st)
 
 addDeps :: Ident -> Naming ()
@@ -70,6 +72,14 @@ addDeps x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
 removeDeps :: [Ident] -> Naming ()
 removeDeps xs =
     modify (\s -> s { nstDeps = (nstDeps s) S.\\ (S.fromList xs) })
+
+addExport :: Ident -> Naming ()
+addExport x =
+ modify (\s -> s { nstExports = S.insert x $ nstExports s })
+
+removeExport :: Ident -> Naming ()
+removeExport x =
+    modify (\s -> s { nstExports = S.delete x $ nstExports s })
 
 runNaming :: NameMap -> Naming a -> Either NamingError a
 runNaming gs n = runExcept (evalStateT n st)
@@ -123,7 +133,7 @@ checkExported x = do
   exports <- nstExports <$> get
   if x `S.member` exports
   then do
-    modify (\s -> s { nstExports = S.delete x exports })
+    removeExport x
     return $ Public
   else return Private
 
@@ -135,10 +145,7 @@ checkBinding (Binding t x _ _ (Val e)) = do
   -- Does not (because we don't want to increase the depth through let-bindings)
   -- But specifically in the case of top-level value bindings we need to increase
   -- the depth, so that nested let-bindings aren't treated at globals
-  d <- nstDepth <$> get
-  modify (\s -> s { nstDepth = d + 1 })
   (e', deps) <- block $ checkExpr e
-  modify (\s -> s { nstDepth = d })
   return $ Binding t x' p deps (Val e')
 checkBinding (Binding t x _ _ (Fun f)) = do
    (NameEntry x' _) <- lookup x
@@ -214,10 +221,7 @@ checkExpr e =
 
 checkFunction :: Ident -> [Ident] -> Publicity -> UExpr -> Naming UFunction
 checkFunction f xs p e = do
-  oldDepth <- nstDepth <$> get
-  modify (\s -> s { nstDepth = oldDepth + 1 })
   ((xs', body), deps) <- block $ scopedVars' xs $ checkExpr e
-  modify (\s -> s { nstDepth = oldDepth })
   return $ Function f (MonoType ()) (map (\x -> (x, ())) xs') p deps body
 
 checkType :: [Ident] -> Type -> Naming Type
@@ -253,7 +257,7 @@ checkTypeDef' (TypeDef tn tPrms rg (TBConses cs)) = do
     checkAndIntroCons (TypeCons c ts) = do
       ts' <- mapM (checkType ps) ts
       let qn = tn <> c
-      modify (\s -> s { nstScope = M.insert qn (NameEntry qn NKCons) $ nstScope s })
+      insert qn (NameEntry qn NKCons)
       return $ TypeCons (tn <> c) ts'
 
 checkTypeDefs :: [TypeDef] -> Naming [TypeDef]
@@ -265,7 +269,7 @@ checkTypeDefs tds = do
                else return $ M.insert tn (Just tb) m)
         builtins
         tds
-  modify (\s -> s { nstTypes =  types} )
+  modify (\s -> s { nstTypes = types } )
   mapM checkTypeDef tds
   where
     builtins = M.fromList $ map (\x -> (mkId x, Nothing)) ["int", "()"]
@@ -275,7 +279,7 @@ registerExport (PathItem ps Nothing Nothing) =
   let (ns, n) = case unsnoc ps of
                   Nothing -> error $ "Empty path item??"
                   Just x -> x
-  in modify (\s -> s { nstExports = S.insert (Ident n ns Nothing) $ nstExports s })
+  in addExport (Ident n ns Nothing)
 registerExport p = error $ "Unsupported export: " ++ (show p)
 
 checkModule :: UModule -> Naming UModule

@@ -11,7 +11,7 @@ import Control.Monad.State
 import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
 import Data.Maybe (isNothing)
-import Data.List (intersperse, find)
+import Data.List (intersperse)
 import qualified Data.List.NonEmpty as NE
 import Data.Set (Set)
 import qualified Data.Set as S
@@ -51,7 +51,7 @@ instanciate ts x = subst (Subst $ M.fromList $ zip [0 :: Int ..] ts) x
 
 instanciateType :: Type -> [Type] -> TypeDef -> Mono TypeDef
 instanciateType _ [] td = return td
-instanciateType t ts td@(TypeDef tn _ _ _) = do
+instanciateType t ts td = do
   let td' = instanciate ts td
   let instSuffix = T.concat $ "_" : (intersperse "_" $ map encodeType $ map MonoType $ tdParams td')
   let td'' = td' { tdName = (tdName td') `suffixId` instSuffix
@@ -74,13 +74,6 @@ instanciateTypeDef c ts = do
             return td'
     Just td -> return td
 
-
-instanciateFunc :: Ident -> Type -> Mono Ident
-instanciateFunc fx ft = do
-  mx <- instanciateFunc' fx ft
-  case mx of
-    Nothing -> error $ "Tried to instanciate unknown function: " ++ (show fx)
-    Just x -> return x
 
 tryInstanciateFunc :: Ident -> Type -> Mono Ident
 tryInstanciateFunc fx ft | not $ null $ freeVars ft = return fx
@@ -140,13 +133,13 @@ monoType :: Type -> Mono Type
 monoType t | isBuiltinType t = return t
 monoType t@(TVar _) = return t
 monoType t@(TCons _ []) = return t
-monoType t@(TFun ts rt) = do
+monoType (TFun ts rt) = do
   rt' <- monoType rt
   ts' <- mapM monoType ts
   let fty = TFun ts' rt'
   let fvs = S.toList $ freeVars fty
   ((`TCons` (map TVar fvs)) . tdName) <$> (instanciateFunTy fvs ts' rt')
-monoType t@(TCons c ts) = do
+monoType (TCons c ts) = do
   ts' <- mapM monoType ts
   if null $ foldMap freeVars ts'
   then ((`TCons` []) . tdName) <$> instanciateTypeDef c ts'
@@ -158,7 +151,7 @@ monoTypeDef td = do
   ktds <- mstKnownTypes <$> get
   td' <- monoTypeDef' td
   case M.lookup (tdName td') ktds of
-    Just x -> error $ "Tried to monomorphise the same type twice! " ++ (show td) ++ " vs " ++ (show td')
+    Just _ -> error $ "Tried to monomorphise the same type twice! " ++ (show td) ++ " vs " ++ (show td')
     Nothing -> do
       modify (\s -> s { mstKnownTypes = M.insert (tdName td') td' $ mstKnownTypes s })
       return td'
@@ -192,11 +185,11 @@ monoCase (Case p bs e) = do
 monoExpr :: TExpr -> Mono TExpr
 monoExpr e =
   case e of
-    EIdent t x -> error $ "Unexpected EIdent during monomorphisation, expected materialed refs instead: " ++ (show e)
+    EIdent _ _ -> error $ "Unexpected EIdent during monomorphisation, expected materialed refs instead: " ++ (show e)
     -- Note that we're trying not to lower the called-function type to an alias here
-    EApp t e es -> EApp <$> (monoType t)
-                        <*> (monoExpr e)
-                        <*> (mapM monoExpr es)
+    EApp t e0 es -> EApp <$> (monoType t)
+                         <*> (monoExpr e0)
+                         <*> (mapM monoExpr es)
     EIf t e0 e1 e2 -> EIf <$> (monoType t)
                           <*> (monoExpr e0)
                           <*> (monoExpr e1)
@@ -205,14 +198,14 @@ monoExpr e =
     ELocal t x -> monoName ELocal t x
     ECons t cx -> (\t' -> ECons t' cx) <$> (monoType t)
     ETup t es -> ETup <$> (monoType t) <*> (mapM monoExpr es)
-    ELet t bs e -> do
+    ELet t bs e0 -> do
       registerFuns bs
       ELet <$> (monoType t)
            <*> (mapM monoBinding bs)
-           <*> (monoExpr e)
-    ECase t e cs -> ECase <$> (monoType t)
-                          <*> (monoExpr e)
-                          <*> (mapM monoCase cs)
+           <*> (monoExpr e0)
+    ECase t e0 cs -> ECase <$> (monoType t)
+                           <*> (monoExpr e0)
+                           <*> (mapM monoCase cs)
     _ -> return e
   where
     monoName :: (Type -> Ident -> TExpr) -> Type -> Ident -> Mono TExpr

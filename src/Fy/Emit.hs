@@ -159,7 +159,7 @@ emitFunction f@(IRFunc { irfName = n, irfDeps = deps }) = do
       emit " "
       emitIdent fn
       parens $ do
-        seperated ", " (\(n, t) -> (emitType t) >> (emit " ") >> (emitIdent n)) $ irfArgs f0
+        seperated ", " (\(x, t) -> (emitType t) >> (emit " ") >> (emitIdent x)) $ irfArgs f0
 
 emitStmts :: [IRStmt] -> Emitter ()
 emitStmts [] = return ()

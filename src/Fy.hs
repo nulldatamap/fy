@@ -2,7 +2,6 @@ module Fy
     ( compileAndRun
     ) where
 
-
 import Prelude hiding (lookup, lines)
 import qualified Data.Text.IO as TIO
 import System.Exit
@@ -12,10 +11,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Control.Monad (when, foldM)
 import Prettyprinter
-import Prettyprinter.Util
 import Prettyprinter.Render.Terminal
 
-import Fy.Types
 import Fy.Ast
 import Fy.Parser
 import Fy.Naming
@@ -33,7 +30,7 @@ data Repr = RSource String Text
           | RC Text
 
 instance CPretty Repr where
-  cpretty (RSource f src) = cpretty src
+  cpretty (RSource _ src) = cpretty src
   cpretty (RUAst m) = cpretty m
   cpretty (RTAst m) = cpretty m
   cpretty (RIr m)   = cpretty m
@@ -77,24 +74,40 @@ irPass n p out err =
               _ -> error $ "Expect ir input for pass: " ++ (show n))
 
 -- TODO:
--- - Type annotations
--- - Type parameter usage (for types)
--- - Source locations
--- - Error context
--- - Name aliases
--- - Module system
--- - Guards?
--- - Zero types
--- - Tuples
--- - Records
--- - @-patterns
--- - Lambdas
--- - Closures
--- - "Effects"
--- - Effect handlers
--- - Traits
--- - Trait boxing
--- - Pipe operators
+-- - Language features:
+--   - Lambdas
+--   - Type annotations
+--   - Type parameter usage (for types)
+--   - Name aliases
+--   - Module system
+--   - Guards?
+--   - Zero types
+--   - Tuples
+--   - Records
+--   - @-patterns
+--   - Closures
+--   - "Effects"
+--   - Effect handlers
+--   - Traits
+--   - Trait boxing
+--   - Infix operators
+--   - Pipe operators
+--   - GC Roots
+--   - GC
+--   - Pattern completeness checks
+--   - Binding pattern-matching
+-- - Optimizations:
+--   - Better boxing heuristics
+--   - Dead code elim
+--   - Escape analysis
+--   - Tail calls
+--   - Shrinking
+--   - Defunctionalization?
+--   - Lambda lifting
+-- - QoL:
+--   - Source locations
+--   - Error context
+
 
 passes :: [Pass]
 passes =

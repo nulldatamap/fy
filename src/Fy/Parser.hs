@@ -130,7 +130,9 @@ pCaseExpr = do
 
 pLamExpr :: Parser UExpr
 pLamExpr = ((ELam ()) <$> ((`zip` (repeat ())) <$> (symbol "\\" *> pParams))
-                      <*> ((symbol "->") *> pCaseExpr))
+                      --  deps               captures
+                      <*> (pure S.empty) <*> (pure [])
+                      <*> ((symbol "->") *> pLamExpr))
         <|> pCaseExpr
 
 pNonLetExpr :: Parser UExpr
@@ -164,7 +166,7 @@ pBinding = do
     if isV
     then Binding (MonoType ()) x Private (S.empty) $ Val body
     else Binding (MonoType ()) x Private (S.empty) $
-           Fun $ Function x (MonoType ()) (zip args $ repeat ()) Private (S.empty) body
+           Fun $ Function x (MonoType ()) (zip args $ repeat ()) [] Private S.empty body
 
 pPat' :: Parser UPat
 pPat' =  (symbol "_" *> (return $ PHole ()))

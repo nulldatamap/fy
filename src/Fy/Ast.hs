@@ -68,6 +68,7 @@ data Binding t = Binding { bType :: TypeSchemeT t
 data Function t = Function { fName   :: Ident
                            , fType   :: TypeSchemeT t
                            , fArgs   :: [(Ident, t)]
+                           , fEnv    :: [(Ident, t)]
                            , fPub    :: Publicity
                            , fDeps   :: Set Ident
                            , fBody   :: Expr t }
@@ -97,10 +98,10 @@ data Expr t = ELit t Lit
             | ELet t [Binding t] (Expr t)
             | EIf t (Expr t) (Expr t) (Expr t)
             | ECase t (Expr t) [Case t]
-            | ELam t [(Ident, t)] (Expr t)
+            | ELam t [(Ident, t)] (Set Ident) [(Ident, t)] (Expr t)
             -- Never parsed:
             | ELocal t Ident
-            -- | ECapture t Ident
+            | ECapture t Ident
             | EGlobal t Ident
             | ECons t Ident
     deriving (Show, Functor, Foldable)
@@ -125,12 +126,13 @@ instance Typed Expr where
   withType f x@(ELit t _) = f t x
   withType f x@(EIdent t _) = f t x
   withType f x@(ELocal t _) = f t x
+  withType f x@(ECapture t _) = f t x
   withType f x@(EGlobal t _) = f t x
   withType f x@(ECons t _) = f t x
   withType f x@(EBuiltin t _) = f t x
   withType f x@(EApp t _ _) = f t x
   withType f x@(ELet t _ _) = f t x
-  withType f x@(ELam t _ _) = f t x
+  withType f x@(ELam t _ _ _ _) = f t x
   withType f x@(EIf t _ _ _) = f t x
   withType f x@(ECase t _ _) = f t x
   withType f x@(ETup t _) = f t x
@@ -192,7 +194,7 @@ instance TypeDeps TypeDef where
   typeDeps (TypeDef _ _ _ b) = typeDeps b
 
 bindingFromFunction :: Function a -> Binding a
-bindingFromFunction f@(Function n t _ p d _) = Binding t n p d (Fun f)
+bindingFromFunction f@(Function n t _ _ p d _) = Binding t n p d (Fun f)
 
 isFun :: ValOrFun t -> Bool
 isFun (Fun _) = True

@@ -4,7 +4,7 @@ module Fy.Types
      , Context(..)
      , mkId, suffixId, canonicalId, enumeratedIds
      , unnamedFields, variantField, typeName
-     , builtinTypeNames, isBuiltinType, bare
+     , builtinTypeNames, isBuiltinType, bare, ununiq
      , encodeType, unFn, isFnTy, tUnit, tInt, tBool
      ) where
 
@@ -132,6 +132,9 @@ mkId x = Ident x [] Nothing
 
 bare :: Ident -> Ident
 bare (Ident x _ _) = Ident x [] Nothing
+
+ununiq :: Ident -> Ident
+ununiq (Ident x ns _) = Ident x ns Nothing
 
 suffixId :: Ident -> Text -> Ident
 suffixId (Ident x ns i) s = Ident (T.append x s) ns i

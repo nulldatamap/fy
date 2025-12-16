@@ -15,6 +15,8 @@ import Control.Monad.State
 import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
 
+import Debug.Trace (trace)
+
 data NameKind = NKLocal Int
               | NKGlobal
               | NKCons
@@ -30,13 +32,14 @@ type TypeDefMap = M.HashMap Ident (Maybe TypeBody)
 data NamingSt = NamingSt { nstNext    :: Int
                          , nstDepth   :: Int
                          , nstDeps    :: Set Ident
+                         , nstCaps    :: Set Ident
                          , nstTypes   :: TypeDefMap
                          , nstExports :: Set Ident
                          , nstScope   :: NameMap }
 
 data NamingError = UndefinedName Ident
                  | UndefinedType Ident
-                 | InvalidCapture Ident
+                 | InvalidCaptures [Ident]
                  | DuplicateNames [Ident]
                  | InvalidPattern UPat
                  | UnresolvedExports [Ident]
@@ -55,19 +58,24 @@ uniqId (Ident x ns _) = do
   modify (\s -> s { nstNext = n + 1 })
   return $ Ident x ns (Just n)
 
-block :: Naming a -> Naming (a, Set Ident)
+block :: Naming a -> Naming (a, Set Ident, Set Ident)
 block x = do
   oldSt <- get
   modify (\s -> s { nstDeps = S.empty
+                  , nstCaps = S.empty
                   , nstDepth = 1 + (nstDepth oldSt) })
   r <- x
   st <- get
   modify (\s -> s { nstDeps = nstDeps oldSt
+                  , nstCaps = nstCaps oldSt
                   , nstDepth = nstDepth oldSt })
-  return (r, nstDeps st)
+  return (r, nstDeps st, nstCaps st)
 
-addDeps :: Ident -> Naming ()
-addDeps x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
+addDep :: Ident -> Naming ()
+addDep x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
+
+addCap :: Ident -> Naming ()
+addCap x = modify (\s -> s { nstCaps = S.insert x (nstCaps s) })
 
 removeDeps :: [Ident] -> Naming ()
 removeDeps xs =
@@ -89,6 +97,7 @@ runNaming gs n = runExcept (evalStateT n st)
                   , nstDepth = 0
                   , nstExports = S.empty
                   , nstDeps = S.empty
+                  , nstCaps = S.empty
                   , nstTypes = M.empty }
 
 withVars :: [(Ident, Ident)] -> Naming a -> Naming a
@@ -109,7 +118,11 @@ scopedVars' xs m = do
                             x' <- if isGlobal then return x else uniqId x
                             return (S.insert x seen, x':xs')) (S.empty, []) $ reverse xs
     let nk = if isGlobal then NKGlobal else (NKLocal d)
-    r <- scoped (map (\(x, x') -> (x, NameEntry x' nk)) $ zip xs xs') $ ((,) xs') <$> m
+    r <- scoped (concatMap (\(x, x') ->
+                              let ne = NameEntry x' nk
+                              in [(x, ne), (x', ne)])
+                   (zip xs xs'))
+           (((,) xs') <$> m)
     removeDeps xs'
     return r
 
@@ -145,7 +158,8 @@ checkBinding (Binding t x _ _ (Val e)) = do
   -- Does not (because we don't want to increase the depth through let-bindings)
   -- But specifically in the case of top-level value bindings we need to increase
   -- the depth, so that nested let-bindings aren't treated at globals
-  (e', deps) <- block $ checkExpr e
+  (e', deps, caps) <- block $ checkExpr e
+  bubbleUpCaps caps
   return $ Binding t x' p deps (Val e')
 checkBinding (Binding t x _ _ (Fun f)) = do
    (NameEntry x' _) <- lookup x
@@ -193,18 +207,34 @@ checkCase (Case p _ e) = do
   e' <- withVars vs $ checkExpr e
   return (Case p' (map (\(_, v) -> (v, ())) vs) e')
 
+useOrCap :: Ident -> Naming (Bool, NameEntry)
+useOrCap x = do
+  ne <- lookup x
+  curDepth <- nstDepth <$> get
+  let n = neName ne
+  let doCap = case neKind ne of
+                NKLocal d | d /= curDepth -> True
+                _ -> False
+  if doCap then addCap n else addDep n
+  return (doCap, ne)
+
+bubbleUpCaps :: Set Ident -> Naming ()
+bubbleUpCaps xs =
+  mapM_ useOrCap xs
+
 checkExpr :: UExpr -> Naming UExpr
 checkExpr e =
   case e of
     EIdent () x  -> do
-      ne <- lookup x
-      curDepth <- nstDepth <$> get
-      addDeps $ neName ne
-      case neKind ne of
-        NKLocal d | d /= curDepth -> throwError $ InvalidCapture (neName ne)
-        NKLocal _ -> return $ ELocal () (neName ne)
-        NKGlobal  -> return $ EGlobal () (neName ne)
-        NKCons    -> return $ ECons () (neName ne)
+      (cap, ne) <- useOrCap x
+      let n = neName ne
+      if cap
+      then return $ ECapture () n
+      else
+        case neKind ne of
+          NKLocal _ -> return $ ELocal () n
+          NKGlobal  -> return $ EGlobal () n
+          NKCons    -> return $ ECons () n
     EApp () f xs -> (EApp ()) <$> (checkExpr f) <*> (mapM checkExpr xs)
     ELet () bs e0 -> checkLocals bs e0
     EIf () e0 e1 e2 -> do
@@ -216,13 +246,23 @@ checkExpr e =
       e0' <- checkExpr e0
       cs' <- mapM checkCase cs
       return $ ECase () e0' cs'
-    ELam () xs e0 -> error "TODO: checkExpr ELam"
+    ELam () xs _ _ e0 -> do
+      ((xs', e0'), deps, caps) <- block $ scopedVars' (map fst xs) $ checkExpr e0
+      bubbleUpCaps caps
+      return $ ELam () (zip xs' $ repeat ()) deps (zip (S.toList caps) $ repeat ()) e0'
     _ -> return e
 
 checkFunction :: Ident -> [Ident] -> Publicity -> UExpr -> Naming UFunction
 checkFunction f xs p e = do
-  ((xs', body), deps) <- block $ scopedVars' xs $ checkExpr e
-  return $ Function f (MonoType ()) (map (\x -> (x, ())) xs') p deps body
+  ((xs', body), deps, caps) <- block $ scopedVars' xs $ checkExpr e
+  bubbleUpCaps caps
+  return $ Function { fName = f
+                    , fType = MonoType ()
+                    , fArgs = map (\x -> (x, ())) xs'
+                    , fEnv  = zip (S.toList caps) $ repeat ()
+                    , fPub  = p
+                    , fDeps = deps
+                    , fBody = body }
 
 checkType :: [Ident] -> Type -> Naming Type
 checkType _ (TVar _) = error "Parametric types are not supported yet"
@@ -292,4 +332,8 @@ checkModule m = do
   return m { mTypeDefs = tds', mItems = is }
 
 namingCheck :: UModule -> Either NamingError UModule
-namingCheck m = runNaming M.empty (checkModule m)
+namingCheck m = runNaming M.empty $ do
+  m' <- checkModule m
+  caps <- nstCaps <$> get
+  unless (S.null caps) $ throwError $ InvalidCaptures $ S.toList caps
+  return m'

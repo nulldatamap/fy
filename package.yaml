@@ -45,6 +45,7 @@ ghc-options:
 - -Wpartial-fields
 - -Wredundant-constraints
 - -Werror=incomplete-patterns
+- -Werror=missing-fields
 
 default-extensions:
 - OverloadedStrings

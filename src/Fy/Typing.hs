@@ -135,6 +135,7 @@ inferFunction' f prmTys retTy = do
   fty <- realize $ TFun prmTys retTy
   return $ Function { fName = fName f
                     , fType = MonoType fty
+                    , fEnv  = undefined -- TODO
                     , fArgs = zip (map fst $ fArgs f) prmTys
                     , fPub  = fPub f
                     , fDeps = fDeps f

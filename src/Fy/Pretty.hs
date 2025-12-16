@@ -10,6 +10,7 @@ import Fy.Ir
 import Prelude hiding (init)
 import Data.Text (Text)
 import Data.Set (Set)
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as S
 import Prettyprinter
 import Prettyprinter.Render.Terminal
@@ -51,6 +52,9 @@ cbi = annotate $ color Yellow
 
 clt :: CDoc -> CDoc
 clt = annotate $ colorDull Magenta
+
+ccp :: CDoc -> CDoc
+ccp = annotate $ colorDull Yellow
 
 instance CPretty Ident where
   cpretty = viaShow
@@ -100,6 +104,17 @@ prettyDeps deps =
     go [x] = cpretty x
     go (x0:x1:xs) = (cpretty x0) <> "," <> (go $ x1:xs)
 
+prettyBindings :: (Show t, TypeAnn t) => [(Ident, t)] -> Maybe Text -> [CDoc]
+prettyBindings bs label =
+  if null bs
+  then []
+  else [cig $ (pretty $ fromMaybe "" label) <> (enclose "{" "}" $ go bs)]
+  where
+    binding (x, t) = (cpretty x) <+> ":" <+> (cpretty t)
+    go [] = emptyDoc
+    go [x] = binding x
+    go (x0:x1:xs) = (binding x0) <> "," <> (go $ x1:xs)
+
 instance (Show t, TypeAnn t) => CPretty (Binding t) where
   cpretty (Binding _ n _ deps b) =
     case b of
@@ -109,9 +124,9 @@ instance (Show t, TypeAnn t) => CPretty (Binding t) where
       Fun f -> "." <+> cpretty f
 
 instance (Show t, TypeAnn t) => CPretty (Function t) where
-  cpretty (Function n t args _ deps b) =
+  cpretty (Function n t args env _ deps b) =
     align $ sep $ [(hsep $ (cdf $ cpretty n):argsDoc) `prettyTypeAnn` t]
-                    ++ prettyDeps deps
+                    ++ (prettyDeps deps) ++ (prettyBindings env $ Just "env:")
                     ++ [nst $ sep ["=", cpretty b]]
     where
       argsDoc :: [CDoc]
@@ -128,17 +143,8 @@ instance (Show t, TypeAnn t) => CPretty (Pat t) where
 
 instance (Show t, TypeAnn t) => CPretty (Case t) where
   cpretty (Case p bs arm) = "|" <+> (hng $ sep $ [cpretty p]
-                                                  ++ bsDoc
+                                                  ++ (prettyBindings bs Nothing)
                                                   ++ [hng $ sep $ ["->", (cpretty arm)]])
-    where
-        bsDoc =
-            if null bs
-            then []
-            else [cig $ enclose "{" "}" $ go bs]
-        binding (x, t) = (cpretty x) <+> ":" <+> (cpretty t)
-        go [] = emptyDoc
-        go [x] = binding x
-        go (x0:x1:xs) = (binding x0) <> "," <> (go $ x1:xs)
 
 instance (Show t, TypeAnn t) => CPretty (Expr t) where
   cpretty (ELit t l) = (cpretty l) `prettyTypeAnn` t
@@ -153,9 +159,12 @@ instance (Show t, TypeAnn t) => CPretty (Expr t) where
   cpretty (ECase t e0 cs) = (align $ sep $ (cpretty e0):(map cpretty cs)) `prettyTypeAnn` t
   cpretty (ELocal t x) = (clc $ cpretty x) `prettyTypeAnn` t
   cpretty (EGlobal t x) = (cgl $ cpretty x) `prettyTypeAnn` t
+  cpretty (ECapture t x) = (ccp $ cpretty x) `prettyTypeAnn` t
   cpretty (ECons t x) = parens $ (ccn $ cpretty x) `prettyTypeAnn` t
-  cpretty (ELam t xs e) =
-    (parens $ "\\" <> (align $ sep $ map (clc . cpretty . fst) xs) <+> "->" <+> (hng $ cpretty e))
+  cpretty (ELam t xs deps caps e) =
+    (parens $ "\\" <> (sep $ (align $ sep $ map (clc . cpretty . fst) xs) : (prettyDeps deps)
+                               ++ (prettyBindings caps (Just "env:"))
+                               ++ [ "->", hng $ cpretty e]))
       `prettyTypeAnn` t
 
 instance CPretty PathItem where

@@ -6,6 +6,7 @@ module Fy.Ast
   , Module(..), PathItem(..), Publicity(..)
   , UModule, UProgram, UPat, UCase, UExpr, UFunction, UBinding
   , TModule, TProgram, TPat, TCase, TExpr, TFunction, TBinding
+  , AstVisitor(..), newVisitor, visitFunction, visitBinding, visitExpr, visitCase, visitPat
   , isFun, bindingFromFunction, TypeDeps(..)
   ) where
 
@@ -189,9 +190,79 @@ instance TypeDeps TypeBody where
   typeDeps (TBAlias t) = typeDeps t
   typeDeps _ = S.empty
 
-
 instance TypeDeps TypeDef where
   typeDeps (TypeDef _ _ _ b) = typeDeps b
+
+data AstVisitor m t =
+  AstVisitor { avPreFunction :: Function t -> m (Function t)
+             , avPostFunction :: Function t -> m (Function t)
+             , avPreBinding :: Binding t -> m (Binding t)
+             , avPostBinding :: Binding t -> m (Binding t)
+             , avPreExpr  :: Expr t -> m (Expr t)
+             , avPostExpr :: Expr t -> m (Expr t)
+             , avPreCase :: Case t -> m (Case t)
+             , avPostCase :: Case t -> m (Case t)
+             , avPrePat :: Pat t -> m (Pat t)
+             , avPostPat :: Pat t -> m (Pat t) }
+
+newVisitor :: Monad m => AstVisitor m t
+-- Oh dear dear:
+newVisitor = AstVisitor -- I miss you already
+  -- I hope you will soon:
+  return
+  return
+  return
+  return
+  return
+  return
+  return
+  return
+  return
+  return
+
+visitFunction :: Monad m => AstVisitor m t -> Function t -> m (Function t)
+visitFunction v f = do
+  f' <- avPreFunction v f
+  body' <- visitExpr v $ fBody f'
+  avPostFunction v $ f' { fBody = body' }
+
+visitBinding :: Monad m => AstVisitor m t -> Binding t -> m (Binding t)
+visitBinding v b = do
+  b' <- avPreBinding v b
+  body' <- case bBody b' of
+             Val e -> Val <$> (visitExpr v e)
+             Fun f -> Fun <$> (visitFunction v f)
+  avPostBinding v $ b' { bBody = body' }
+
+visitExpr :: Monad m => AstVisitor m t -> Expr t -> m (Expr t)
+visitExpr v e = do
+  e' <- avPreExpr v e
+  e'' <- case e' of
+           ETup t es -> (ETup t) <$> (mapM recur es)
+           EApp t e0 es -> (EApp t) <$> (recur e0) <*> (mapM recur es)
+           ELet t bs e0 -> (ELet t) <$> (mapM (visitBinding v) bs) <*> (recur e0)
+           EIf t e0 e1 e2 -> (EIf t) <$> (recur e0) <*> (recur e1) <*> (recur e2)
+           ECase t e0 cs -> (ECase t) <$> (recur e0) <*> (mapM (visitCase v) cs)
+           ELam t xs deps caps e0 -> (ELam t xs deps caps) <$> (recur e0)
+           _ -> return e
+  avPostExpr v e''
+  where
+    recur = visitExpr v
+
+visitCase :: Monad m => AstVisitor m t -> Case t -> m (Case t)
+visitCase v c = do
+  c' <- avPreCase v c
+  p' <- visitPat v $ cPat c'
+  e' <- visitExpr v $ cArm c'
+  avPostCase v $ c' { cPat = p', cArm = e' }
+
+visitPat :: Monad m => AstVisitor m t -> Pat t -> m (Pat t)
+visitPat v p = do
+  p' <- avPrePat v p
+  p'' <- case p' of
+           PCons t x ps -> (PCons t x) <$> (mapM (visitPat v) ps)
+           _ -> return p'
+  avPostPat v p''
 
 bindingFromFunction :: Function a -> Binding a
 bindingFromFunction f@(Function n t _ _ p d _) = Binding t n p d (Fun f)

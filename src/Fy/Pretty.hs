@@ -93,6 +93,7 @@ nst = nest 2
 hng :: Doc a -> Doc a
 hng = hang 2
 
+
 prettyDeps :: Set Ident -> [CDoc]
 prettyDeps deps =
   if S.null deps

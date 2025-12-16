@@ -15,8 +15,6 @@ import Control.Monad.State
 import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
 
-import Debug.Trace (trace)
-
 data NameKind = NKLocal Int
               | NKGlobal
               | NKCons

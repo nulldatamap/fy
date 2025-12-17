@@ -206,6 +206,12 @@ monoExpr e =
     ECase t e0 cs -> ECase <$> (monoType t)
                            <*> (monoExpr e0)
                            <*> (mapM monoCase cs)
+    ELam t xs deps caps e0 ->
+      ELam <$> (monoType t)
+           <*> (mapM (\(x, t0) -> ((,) x) <$> (monoType t0)) xs)
+           <*> (return deps)
+           <*> (mapM (\(x, t0) -> ((,) x) <$> (monoType t0)) caps)
+           <*> (monoExpr e0)
     _ -> return e
   where
     monoName :: (Type -> Ident -> TExpr) -> Type -> Ident -> Mono TExpr

@@ -280,7 +280,7 @@ inferExpr (ELam _ xs deps caps e0) = do
                    t <- typeOfName x
                    return (x, t)) caps
   e0' <- scoped xs' $ inferExpr e0
-  return $ ELam (TFun prmTys (typeOf e0')) (zip prms prmTys) deps [] e0'
+  return $ ELam (TFun prmTys (typeOf e0')) (zip prms prmTys) deps caps' e0'
 
 inferExpr e = error $ "Type inference is not yet supported for: " ++ (show e)
 

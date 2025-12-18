@@ -18,14 +18,20 @@ import Control.Monad.State
 import Control.Monad.RWS
 import qualified Data.HashMap.Strict as M
 
+data NameKind = NKBareFunc
+              | NKCloFunc
+              | NKVal
+
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
+                             , lstNameKinds :: M.HashMap Ident NameKind
                              , lstTypes :: M.HashMap Ident IRTypeDef }
 
 type Lowering = RWS () [IRStmt] LoweringSt
 
 data IRTypeKind = IRTDef IRTypeDef
                 | IRTBox
+                | IRTClo IRFPtrType
                 | IRTBuiltin Ident
                 deriving (Show)
 
@@ -34,13 +40,25 @@ runLowering m = fst $ evalRWS m () $
   LoweringSt { lstNext  = 0
              , lstFuncs = []
              , lstTypes = M.empty
-             }
+             , lstNameKinds = M.empty }
 
 newVar' :: (Maybe Text) -> Lowering Ident
 newVar' t = do
   x <- lstNext <$> get
   modify (\s -> s { lstNext = x + 1 } )
   return $ Ident (fromMaybe "__" t) [] (Just x)
+
+declareName :: Ident -> NameKind -> Lowering ()
+declareName n nk = do
+  modify (\s -> s { lstNameKinds = M.insert n nk $ lstNameKinds s })
+
+nameKind :: Ident -> Lowering NameKind
+nameKind n = do
+  nks <- lstNameKinds <$> get
+  case M.lookup n nks of
+    -- We don't register parameters and case bindings, since they're always values
+    Nothing -> return NKVal
+    Just nk -> return nk
 
 irSet :: IRType -> Ident -> (IRType, IRExpr) -> Lowering ()
 irSet xt x (vt, v) = do
@@ -59,13 +77,13 @@ irDef xt x v = do
   tell d
 
 lowerBinding :: TBinding -> Lowering ()
-lowerBinding l@(Binding t x _ _ (Val e)) = do
+lowerBinding (Binding t x _ _ (Val e)) = do
+  declareName x NKVal
   te' <- lowerExpr' e
-  case t of
-    MonoType t0 -> do
-      t0' <- lowerType t0
-      irDef t0' x (Just te')
-    _ -> error $ "Can't lower a polytype local: " ++ (show l)
+  t0' <- case t of
+           MonoType t0 -> lowerType t0
+           PolyType _ t0 -> lowerType t0
+  irDef t0' x (Just te')
 lowerBinding (Binding { bBody = Fun f }) = lowerFunction f >> return ()
 
 stmts :: Lowering a -> Lowering (a, [IRStmt])
@@ -78,6 +96,7 @@ lowerLit LUnit = IRVoid
 resolveType :: IRType -> Lowering IRTypeKind
 resolveType (IRType tn) | tn `elem` builtinTypeNames = return $ IRTBuiltin tn
 resolveType IRBoxType = return $ IRTBox
+resolveType (IRCloType fptr) = return $ IRTClo fptr
 resolveType (IRType tn) = do
   tys <- lstTypes <$> get
   case M.lookup tn tys of
@@ -94,6 +113,8 @@ isBoxType t = do
     case t' of
       IRTBox -> True
       IRTBuiltin _ -> False
+      -- Closures are not boxed! They're an unboxed function-pointer - environment-pointer pair
+      IRTClo _ -> False
       IRTDef td -> irtdIsBoxed td
 
 irField :: (Maybe IRTypeDef) -> IRExpr -> Ident -> IRExpr
@@ -159,11 +180,12 @@ lowerExpr' e = do
 
 lowerFunType :: Type -> Lowering (IRType, [IRType])
 lowerFunType (TFun ts t) = (,) <$> (lowerType t) <*> (mapM lowerType ts)
-lowerFunType t = do
+lowerFunType (TCons t _) = do
   td <- lookupTypeDef t
   case irtdBody td of
     IRFunType ts rt -> return (ts, rt)
     _ -> error $ "Expected a function type: " ++ (show t)
+lowerFunType t@(TVar _) = error $ "Expected function type: " ++ (show t)
 
 lowerExpr :: TExpr -> Lowering IRExpr
 lowerExpr e =
@@ -175,6 +197,8 @@ lowerExpr e =
       irCons t' (mkId cn) []
     ELocal _ x -> return $ IRVar x
     EGlobal _ x -> return $ IRVar x
+    -- TODO:
+    ECapture _ x -> return $ IRVar x
     EIdent _ _ -> error $ "EIdent found during lowering: " ++ (show e)
     EApp _ (EBuiltin _ b) xs -> do
       xs' <- mapM lowerExpr xs
@@ -189,9 +213,18 @@ lowerExpr e =
         ECons _ (Ident cn _ _) -> do
           t' <- lowerType t
           irCons t' (mkId cn) xs'
-        f -> do
-          fx <- spillExpr "_callee" f
-          return $ IRCall fx xs'
+        _ -> do
+          fe' <- lowerExpr fe
+          fty <- (uncurry IRFPtrType) <$> (lowerFunType (typeOf fe))
+          c <- case fe' of
+                 IRVar fx -> do
+                   nk <- nameKind fx
+                   case nk of
+                     NKVal -> return $ IRInvoke fty fe'
+                     NKCloFunc -> error $ "Bare function name referenced, but it's a closure function: " ++ (show fe)
+                     NKBareFunc -> return $ IRCall fx
+                 _ -> return $ IRInvoke fty fe'
+          return $ c xs'
     ELet _ ls e0 -> do
       mapM_ lowerBinding ls
       lowerExpr e0
@@ -211,15 +244,25 @@ lowerExpr e =
     ECase t e0 cs -> do
       x <- spillExpr "_matchee" e0
       lowerCases x t cs
+    ELam t xs deps env e0 -> do
+      fn <- newVar' (Just "__clo")
+      _ <- lowerFunction $ Function { fName = fn
+                                    , fType = MonoType t
+                                    , fArgs = xs
+                                    , fEnv  = env
+                                    , fPub  = Private
+                                    , fDeps = deps
+                                    , fBody = e0 }
+      -- TODO: Properly capture instead of just referneces (this doesn't respect nested captures)
+      return $ IRClosure fn $ map (IRVar . fst) env
     _ -> error $ "Lowering is not yet supported for: " ++ (show e)
 
-lookupTypeDef :: Type -> Lowering IRTypeDef
-lookupTypeDef (TCons t _) = do
+lookupTypeDef :: Ident -> Lowering IRTypeDef
+lookupTypeDef t = do
   tis <- lstTypes <$> get
   case M.lookup t tis of
     Nothing -> error $ "Unresolved type during lowering: " ++ (show t)
     Just td -> return td
-lookupTypeDef t = error $ "Invalid type during lowering: " ++ (show t)
 
 lowerType' :: Set Ident -> Type -> Lowering IRType
 lowerType' rg (TCons x _) | S.member x rg = return $ IRType x
@@ -228,9 +271,11 @@ lowerType' _ t = lowerType t
 lowerType :: Type -> Lowering IRType
 lowerType (TVar _) = return IRBoxType
 lowerType t@(TCons x []) | isBuiltinType t = return $ IRType x
-lowerType t = do
+lowerType (TCons t _) = do
   td <- lookupTypeDef t
   return $ IRType $ irtdName td
+lowerType (TFun ts t) =
+  IRCloType <$> (IRFPtrType <$> (lowerType t) <*> (mapM lowerType ts))
 
 lowerPattern :: TPat -> IRExpr -> [IRStmt] -> Lowering ([IRExpr], [IRStmt])
 lowerPattern (PHole _) _ bs = return ([], bs)
@@ -238,7 +283,7 @@ lowerPattern (PLit _ l) path bs = return ([IROp OpEq [path, IRLit $ lowerLit l]]
 lowerPattern (PBinding t x) path bs = do
   t' <- lowerType t
   return ([], bs ++ [IRDef t' x $ Just path])
-lowerPattern (PCons t c ps) path bs = do
+lowerPattern (PCons (TCons t _) c ps) path bs = do
   td <- lookupTypeDef t
   let tn = irtdName td
   case irtdBody td of
@@ -258,6 +303,7 @@ lowerPattern (PCons t c ps) path bs = do
     IRTypeAlias (IRType t') ->
       lowerPattern (PCons (TCons t' []) c ps) path bs
     _ -> error $ "Invalid pattern cons type: " ++ (show td)
+lowerPattern (PCons c _ _) _ _ = error $ "Invalid pattern cons type: " ++ (show c)
 
 lowerRecordPattern :: (Maybe IRTypeDef) -> [TPat] -> [IRStmt] -> IRExpr -> [(IRType, Ident)]
                    -> Lowering ([IRExpr], [IRStmt])
@@ -295,6 +341,11 @@ lowerBody b = do
 
 lowerFunction :: TFunction -> Lowering IRFunc
 lowerFunction f = do
+  let fn = fName f
+  if null $ fEnv f
+  then declareName fn NKBareFunc
+  else declareName fn NKCloFunc
+
   let fty = case fType f of
               MonoType mt -> mt
               PolyType _ pt -> pt
@@ -304,7 +355,7 @@ lowerFunction f = do
   (_, body) <- stmts $ lowerBody $ fBody f
   argsTs <- mapM (\(x, t) -> ((,) x) <$> (lowerType t)) $ fArgs f
   retT' <- lowerType retT
-  let f' = IRFunc { irfName  = fName f
+  let f' = IRFunc { irfName  = fn
                   , irfPub   = fPub f
                   , irfRetTy = retT'
                   , irfArgs  = argsTs
@@ -320,7 +371,7 @@ lowerVals bs = stmts $
            (Binding t x p _ (Val e)) -> do
              let t0 = case t of
                         MonoType mt -> mt
-                        _ -> error $ "Polymorphic values are not support yet: " ++ (show x) ++ " : " ++ (show t)
+                        PolyType _ pt -> pt
              te' <- lowerExpr' e
              t0' <- lowerType t0
              irSet t0' x te'

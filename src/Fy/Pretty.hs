@@ -117,9 +117,9 @@ prettyBindings bs label =
     go (x0:x1:xs) = (binding x0) <> "," <> (go $ x1:xs)
 
 instance (Show t, TypeAnn t) => CPretty (Binding t) where
-  cpretty (Binding _ n _ deps b) =
+  cpretty (Binding t n _ deps b) =
     case b of
-      Val e -> "." <+> (align $ sep $ [cdf $ cpretty n]
+      Val e -> "." <+> (align $ sep $ [(cdf $ cpretty n) `prettyTypeAnn` t]
                                         ++ prettyDeps deps
                                         ++ [nst $ sep ["=", cpretty e]])
       Fun f -> "." <+> cpretty f
@@ -149,7 +149,7 @@ instance (Show t, TypeAnn t) => CPretty (Case t) where
 
 instance (Show t, TypeAnn t) => CPretty (Expr t) where
   cpretty (ELit t l) = (cpretty l) `prettyTypeAnn` t
-  cpretty (ETup t es) = (tupled $ map cpretty es) `prettyTypeAnn` t
+  cpretty (ETup t es) = (align $ tupled $ map cpretty es) `prettyTypeAnn` t
   cpretty (EBuiltin _ b) = cpretty b
   cpretty (EIdent t x) = (clc $ cpretty x) `prettyTypeAnn` t
   cpretty (EApp t e es) = (parens $ hng $ sep $ map (group . cpretty) (e:es)) `prettyTypeAnn` t
@@ -181,7 +181,7 @@ instance CPretty PathItem where
       go (p:ps') hd r = go ps' hd (r <> (cpretty p))
       go [] Nothing r = r
       go [] (Just Nothing) r = r <> "/*"
-      go [] (Just (Just ns)) r = r <> "/" <> (tupled $ map cpretty ns)
+      go [] (Just (Just ns)) r = r <> "/" <> (align $ tupled $ map cpretty ns)
 
 instance CPretty TypeCons where
   cpretty (TypeCons n ms) = "|" <+> (hng $ sep $ (ccn $ cpretty n):(map (cty . cpretty) ms))
@@ -220,7 +220,7 @@ instance CPretty IRTypeBody where
   cpretty (IRStructType r) = (ckw "struct") <+> (cpretty r)
   cpretty (IRTaggedType rs) = align $ vsep $ map (\r -> (ckw "tag") <+> (cpretty r)) rs
   cpretty (IRCType c) = (ckw "ctype") <+> (cbi $ cpretty c)
-  cpretty (IRFunType t ts) = (ckw "fptr") <+> (tupled $ map cpretty ts) <+> "->" <+> (cpretty t)
+  cpretty (IRFunType t ts) = (ckw "fptr") <+> (align $ tupled $ map cpretty ts) <+> "->" <+> (cpretty t)
   cpretty (IRTypeAlias t) = (ckw "alias") <+> (cpretty t)
 
 instance CPretty IRTypeDef where
@@ -239,13 +239,15 @@ instance CPretty IRLit where
 
 instance CPretty IRExpr where
   cpretty (IRVar x) = clc $ cpretty x
-  cpretty (IROp o es) = (cbi $ cpretty o) <> (tupled $ map cpretty es)
-  cpretty (IRCall x es) = (cgl $ cpretty x) <> (tupled $ map cpretty es)
+  cpretty (IROp o es) = (cbi $ cpretty o) <> (align $ tupled $ map cpretty es)
+  cpretty (IRCall x es) = (cgl $ cpretty x) <> (align $ tupled $ map cpretty es)
+  cpretty (IRInvoke fty e es) = (parens $ (cpretty e) <+> ":" <+> (cpretty fty)) <> (hng $ tupled $ map cpretty es)
   cpretty (IRUnbox e) = (ckw "unbox") <> (parens $ cpretty e)
-  cpretty (IRCons t x es) = (ccn $ (cpretty t) <> "/" <> (cpretty x)) <> (tupled $ map cpretty es)
+  cpretty (IRCons t x es) = (ccn $ (cpretty t) <> "/" <> (cpretty x)) <> (hng $ tupled $ map cpretty es)
   cpretty (IRLit l) = cpretty l
   cpretty (IRField e x) = (cpretty e) <> "." <> (cpretty x)
   cpretty (IRCheckVariant e x) = (ccn $ (cpretty x) <> "?") <+> (cpretty e)
+  cpretty (IRClosure f es) = (ckw "closure") <> (align $ tupled $ (cpretty f) : (map cpretty es))
 
 instance CPretty IRStmt where
   cpretty (IRDef t n mX) = hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t] ++ xDoc
@@ -273,11 +275,16 @@ instance CPretty IRFunc where
   cpretty (IRFunc n _ ret args _ b) =
     (ckw "func") <+> (cdf $ cpretty n) <> argsDoc <+> "->" <+> (cpretty ret) <+> (block $ map cpretty b)
      where
-       argsDoc = tupled $ map (\(x, t) -> (clc $ cpretty x) <+> ":" <+> (cpretty t)) args
+       argsDoc = align $ tupled $ map (\(x, t) -> (clc $ cpretty x) <+> ":" <+> (cpretty t)) args
+
+instance CPretty IRFPtrType where
+  cpretty (IRFPtrType rt ts) = (ckw "fptr") <+> (align $ tupled $ map cpretty ts) <+> "->" <+> (cpretty rt)
 
 instance CPretty IRType where
   cpretty (IRType t) = cty $ cpretty t
   cpretty IRBoxType = cbi "$$BOX-TYPE"
+  cpretty (IRCloType (IRFPtrType rt ts)) =
+    parens $ (ckw "clo") <+> (align $ tupled $ map cpretty ts) <+> "->" <+> (cpretty rt)
 
 instance CPretty IRVarDecl where
   cpretty (IRVarDecl n _ t) = (ckw "var") <+> (cpretty n) <+> ":" <+> (cpretty t)

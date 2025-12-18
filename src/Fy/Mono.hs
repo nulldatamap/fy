@@ -137,8 +137,7 @@ monoType (TFun ts rt) = do
   rt' <- monoType rt
   ts' <- mapM monoType ts
   let fty = TFun ts' rt'
-  let fvs = S.toList $ freeVars fty
-  ((`TCons` (map TVar fvs)) . tdName) <$> (instanciateFunTy fvs ts' rt')
+  return fty
 monoType (TCons c ts) = do
   ts' <- mapM monoType ts
   if null $ foldMap freeVars ts'

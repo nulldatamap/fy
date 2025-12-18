@@ -18,6 +18,7 @@ import qualified Data.HashMap.Strict as M
 data NameKind = NKLocal Int
               | NKGlobal
               | NKCons
+              | NKCapture
   deriving Show
 
 data NameEntry = NameEntry { neName  :: Ident
@@ -72,8 +73,12 @@ block x = do
 addDep :: Ident -> Naming ()
 addDep x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
 
-addCap :: Ident -> Naming ()
-addCap x = modify (\s -> s { nstCaps = S.insert x (nstCaps s) })
+addCap :: Ident -> Naming NameEntry
+addCap x = do
+  let ne = NameEntry x NKCapture
+  insert x ne
+  modify (\s -> s { nstCaps = S.insert x (nstCaps s) })
+  return ne
 
 removeDeps :: [Ident] -> Naming ()
 removeDeps xs =
@@ -205,17 +210,16 @@ checkCase (Case p _ e) = do
   e' <- withVars vs $ checkExpr e
   return (Case p' (map (\(_, v) -> (v, ())) vs) e')
 
-useOrCap :: Ident -> Naming (Bool, NameEntry)
+useOrCap :: Ident -> Naming NameEntry
 useOrCap x = do
   ne <- lookup x
   curDepth <- nstDepth <$> get
   let n = neName ne
-  let doCap = case neKind ne of
-                NKLocal d | d /= curDepth -> True
-                _ -> False
+  ne' <- case neKind ne of
+           NKLocal d | d /= curDepth -> addCap n
+           _ -> return ne
   addDep n
-  when doCap $ addCap n
-  return (doCap, ne)
+  return ne'
 
 bubbleUpCaps :: Set Ident -> Naming ()
 bubbleUpCaps xs =
@@ -225,15 +229,13 @@ checkExpr :: UExpr -> Naming UExpr
 checkExpr e =
   case e of
     EIdent () x  -> do
-      (cap, ne) <- useOrCap x
+      ne <- useOrCap x
       let n = neName ne
-      if cap
-      then return $ ECapture () n
-      else
-        case neKind ne of
-          NKLocal _ -> return $ ELocal () n
-          NKGlobal  -> return $ EGlobal () n
-          NKCons    -> return $ ECons () n
+      case neKind ne of
+        NKCapture -> return $ ECapture () n
+        NKLocal _ -> return $ ELocal () n
+        NKGlobal  -> return $ EGlobal () n
+        NKCons    -> return $ ECons () n
     EApp () f xs -> (EApp ()) <$> (checkExpr f) <*> (mapM checkExpr xs)
     ELet () bs e0 -> checkLocals bs e0
     EIf () e0 e1 e2 -> do

@@ -83,6 +83,8 @@ emitProgram p = runEmitter $ withTypesAndFuncs p $ do
         , ""
         , "typedef struct {} __fy_unit;"
         , "#define __FY_UNIT ((__fy_unit){})"
+        , "typedef struct { void (*__fptr)(void); void* __env; } __fy_clo;"
+        , "#define __FY_CLO(__ARG_f, __ARG_e) ((__fy_clo) { f, e })"
         , ""
         , "void* __fy_alloc(size_t sz) { return malloc(sz); }"
         , "#define ALLOC(__ARG_t, __ARG_x, __ARG_v) __ARG_t __ARG_x = (__ARG_t)__fy_alloc(sizeof(*__ARG_x)); *__ARG_x = __ARG_v;"
@@ -237,6 +239,19 @@ emitExpr (IRCheckVariant e v) = do
     emitExpr (IRField e variantField)
     emit " == "
     emitIdent $ v
+emitExpr (IRClosure f es) = do
+  -- TODO:
+  emit "__FY_CLO"
+  parens $ (emitIdent f) >> (emit ", NULL")
+emitExpr (IRInvoke (IRFPtrType rt ts) e es) = do
+  parens $ do
+    parens $ do
+      emitType rt
+      emit " (*)"
+      parens $ seperated ", " emitType ts
+    parens $ emitExpr e
+    emit ".__fptr"
+  parens $ seperated ", " emitExpr es
 
 emitIdent' :: Ident -> Emitter ()
 emitIdent' x = emit $ canonicalId x
@@ -250,6 +265,7 @@ emitType (IRType (Ident "bool" [] Nothing)) = emit "bool"
 emitType (IRType (Ident "()" [] Nothing)) = emit "__fy_unit"
 emitType (IRType x) = emitIdent x
 emitType IRBoxType = emit "void*"
+emitType (IRCloType _) = emit "__fy_clo"
 
 emitType' :: Set Ident -> IRType -> Emitter ()
 emitType' ns t =

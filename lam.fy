@@ -1,6 +1,6 @@
 Lam
 
-. main () = 0
+. main () = inc0 (one ())
 -- Syntax
 . zero = \ -> 0
 . one  = \x -> 1

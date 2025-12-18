@@ -1,5 +1,6 @@
 module Fy.Ir
   ( Operator(..)
+  , IRFPtrType(..)
   , IRType(..), IRTypeDef(..), IRRecord(..), IRTypeBody(..)
   , IRVarDecl(..), IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
   , IRProgram(..), Publicity(..)
@@ -18,7 +19,11 @@ data Operator = OpAdd
               | OpAnd
               deriving (Show, Eq)
 
+data IRFPtrType = IRFPtrType IRType [IRType]
+  deriving (Show, Eq)
+
 data IRType = IRType Ident
+            | IRCloType IRFPtrType
             | IRBoxType
   deriving (Show, Eq)
 
@@ -47,6 +52,8 @@ data IRLit = IRInt Integer
 data IRExpr = IRVar Ident
             | IROp Operator [IRExpr]
             | IRCall Ident [IRExpr]
+            | IRInvoke IRFPtrType IRExpr [IRExpr]
+            | IRClosure Ident [IRExpr]
             | IRCons IRType Ident [IRExpr]
             | IRLit IRLit
             | IRUnbox IRExpr

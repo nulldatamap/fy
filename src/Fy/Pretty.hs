@@ -10,7 +10,7 @@ import Fy.Ir
 import Prelude hiding (init)
 import Data.Text (Text)
 import Data.Set (Set)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, maybeToList)
 import qualified Data.Set as S
 import Prettyprinter
 import Prettyprinter.Render.Terminal
@@ -127,7 +127,7 @@ instance (Show t, TypeAnn t) => CPretty (Binding t) where
 instance (Show t, TypeAnn t) => CPretty (Function t) where
   cpretty (Function n t args env _ deps b) =
     align $ sep $ [(hsep $ (cdf $ cpretty n):argsDoc) `prettyTypeAnn` t]
-                    ++ (prettyDeps deps) ++ (prettyBindings env $ Just "env:")
+                    ++ (prettyDeps deps) ++ (prettyBindings (map (\(cx, ct, _) -> (cx, ct)) env) $ Just "env:")
                     ++ [nst $ sep ["=", cpretty b]]
     where
       argsDoc :: [CDoc]
@@ -164,7 +164,7 @@ instance (Show t, TypeAnn t) => CPretty (Expr t) where
   cpretty (ECons t x) = parens $ (ccn $ cpretty x) `prettyTypeAnn` t
   cpretty (ELam t xs deps caps e) =
     (parens $ "\\" <> (sep $ (align $ sep $ map (clc . cpretty . fst) xs) : (prettyDeps deps)
-                               ++ (prettyBindings caps (Just "env:"))
+                               ++ (prettyBindings (map (\(cx, ct, _) -> (cx, ct)) caps) (Just "env:"))
                                ++ [ "->", hng $ cpretty e]))
       `prettyTypeAnn` t
 
@@ -239,6 +239,7 @@ instance CPretty IRLit where
 
 instance CPretty IRExpr where
   cpretty (IRVar x) = clc $ cpretty x
+  cpretty (IREnv x) = (ckw $ "env") <> "." <> (clc $ cpretty x)
   cpretty (IROp o es) = (cbi $ cpretty o) <> (align $ tupled $ map cpretty es)
   cpretty (IRCall x es) = (cgl $ cpretty x) <> (align $ tupled $ map cpretty es)
   cpretty (IRInvoke fty e es) = (parens $ (cpretty e) <+> ":" <+> (cpretty fty)) <> (hng $ tupled $ map cpretty es)
@@ -247,7 +248,8 @@ instance CPretty IRExpr where
   cpretty (IRLit l) = cpretty l
   cpretty (IRField e x) = (cpretty e) <> "." <> (cpretty x)
   cpretty (IRCheckVariant e x) = (ccn $ (cpretty x) <> "?") <+> (cpretty e)
-  cpretty (IRClosure f es) = (ckw "closure") <> (align $ tupled $ (cpretty f) : (map cpretty es))
+  cpretty (IRClosure f e) =
+    hsep $ [ ckw "clo" <> (hng $ tupled $ (cpretty f):(maybeToList $ cpretty <$> e)) ]
 
 instance CPretty IRStmt where
   cpretty (IRDef t n mX) = hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t] ++ xDoc
@@ -259,7 +261,7 @@ instance CPretty IRStmt where
   cpretty (IRSet x e) = hsep $ [clc $ cpretty x, "<-", cpretty e]
   cpretty (IREval e) = cpretty e
   cpretty (IRBox t n e) =
-    hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t,  "=", ckw "box", cpretty e]
+    hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t, "=", ckw "box", cpretty e]
   cpretty (IRReturn e) = hsep $ [ckw "return", cpretty e]
   cpretty (IRIf e0 st0 [th@(IRIf _ _ _)]) =
     hsep $ [ ckw "if", cpretty e0
@@ -272,10 +274,11 @@ instance CPretty IRStmt where
 
 
 instance CPretty IRFunc where
-  cpretty (IRFunc n _ ret args _ b) =
+  cpretty (IRFunc n _ ret args _ env b) =
     (ckw "func") <+> (cdf $ cpretty n) <> argsDoc <+> "->" <+> (cpretty ret) <+> (block $ map cpretty b)
      where
-       argsDoc = align $ tupled $ map (\(x, t) -> (clc $ cpretty x) <+> ":" <+> (cpretty t)) args
+       argsDoc = align $ tupled $ map (\(x, t) -> (clc $ cpretty x) <+> ":" <+> (cpretty t)) $ args ++ env'
+       env' = fromMaybe [] $ (\t -> [(mkId "__env", t)]) <$> env
 
 instance CPretty IRFPtrType where
   cpretty (IRFPtrType rt ts) = (ckw "fptr") <+> (align $ tupled $ map cpretty ts) <+> "->" <+> (cpretty rt)

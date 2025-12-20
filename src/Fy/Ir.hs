@@ -53,9 +53,10 @@ data IRExpr = IRVar Ident
             | IROp Operator [IRExpr]
             | IRCall Ident [IRExpr]
             | IRInvoke IRFPtrType IRExpr [IRExpr]
-            | IRClosure Ident [IRExpr]
+            | IRClosure Ident (Maybe IRExpr)
             | IRCons IRType Ident [IRExpr]
             | IRLit IRLit
+            | IREnv Ident
             | IRUnbox IRExpr
             | IRField IRExpr Ident
             | IRCheckVariant IRExpr Ident
@@ -75,6 +76,7 @@ data IRFunc = IRFunc { irfName  :: Ident
                      , irfRetTy :: IRType
                      , irfArgs  :: [(Ident, IRType)]
                      , irfDeps  :: Set Ident
+                     , irfEnv   :: Maybe IRType
                      , irfBody  :: [IRStmt] }
             deriving (Show)
 

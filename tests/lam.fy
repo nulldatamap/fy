@@ -1,11 +1,11 @@
 Lam
 
-. main () = inc0 (one ())
+. main () = ((add3 three) holder) (inc0 (one ()))
 -- Syntax
 . zero = \ -> 0
 . one  = \x -> 1
 . inc  = \x -> $$add x 1
-. const = \x y -> x
+. constf = \x y -> x
 -- Global usage
 . inc0 = \x -> inc x
 -- Application

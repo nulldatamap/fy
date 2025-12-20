@@ -12,8 +12,9 @@ import qualified Data.Text as T
 import Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.HashMap.Strict as M
+import Data.Maybe (maybeToList)
 import Data.List (intersperse)
-import Control.Monad (when)
+import Control.Monad (when, unless)
 import Control.Monad.RWS
 
 data EmitterSt = EmitterSt {  estSeenNames :: Set Ident }
@@ -84,7 +85,7 @@ emitProgram p = runEmitter $ withTypesAndFuncs p $ do
         , "typedef struct {} __fy_unit;"
         , "#define __FY_UNIT ((__fy_unit){})"
         , "typedef struct { void (*__fptr)(void); void* __env; } __fy_clo;"
-        , "#define __FY_CLO(__ARG_f, __ARG_e) ((__fy_clo) { f, e })"
+        , "#define __FY_CLO(__ARG_f, __ARG_e) ((__fy_clo) { (void(*)(void))__ARG_f, (void*)__ARG_e })"
         , ""
         , "void* __fy_alloc(size_t sz) { return malloc(sz); }"
         , "#define ALLOC(__ARG_t, __ARG_x, __ARG_v) __ARG_t __ARG_x = (__ARG_t)__fy_alloc(sizeof(*__ARG_x)); *__ARG_x = __ARG_v;"
@@ -162,6 +163,10 @@ emitFunction f@(IRFunc { irfName = n, irfDeps = deps }) = do
       emitIdent fn
       parens $ do
         seperated ", " (\(x, t) -> (emitType t) >> (emit " ") >> (emitIdent x)) $ irfArgs f0
+        sequence $ (\envTy -> do
+                       unless (null $ irfArgs f0) $ emit ", "
+                       emitType envTy
+                       emit " __env") <$> (irfEnv f0)
 
 emitStmts :: [IRStmt] -> Emitter ()
 emitStmts [] = return ()
@@ -204,6 +209,7 @@ chainedOp _ op _ xs = seperated op emitExpr xs
 
 emitExpr :: IRExpr -> Emitter ()
 emitExpr (IRVar x) = emitIdent x
+emitExpr (IREnv x) = (emit "__env->") >> (emitIdent' x)
 emitExpr (IRLit l) =
   case l of
     IRInt x -> emit $ T.pack $ show x
@@ -239,19 +245,29 @@ emitExpr (IRCheckVariant e v) = do
     emitExpr (IRField e variantField)
     emit " == "
     emitIdent $ v
-emitExpr (IRClosure f es) = do
-  -- TODO:
+emitExpr (IRClosure f e) = do
   emit "__FY_CLO"
-  parens $ (emitIdent f) >> (emit ", NULL")
+  parens $ do
+    emitIdent f
+    emit ", "
+    case e of
+      Nothing -> emit "NULL"
+      Just e0 -> emitExpr e0
 emitExpr (IRInvoke (IRFPtrType rt ts) e es) = do
   parens $ do
     parens $ do
       emitType rt
       emit " (*)"
-      parens $ seperated ", " emitType ts
-    parens $ emitExpr e
-    emit ".__fptr"
-  parens $ seperated ", " emitExpr es
+      parens $ seperated ", " emitType (ts ++ [IRBoxType])
+    parens $ do
+      emitExpr e
+      emit ".__fptr"
+  parens $ do
+    seperated ", " emitExpr es
+    unless (null es) $ emit ", "
+    -- Uhm this should probably be a variable?
+    emitExpr e
+    emit ".__env"
 
 emitIdent' :: Ident -> Emitter ()
 emitIdent' x = emit $ canonicalId x

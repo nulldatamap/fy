@@ -130,13 +130,22 @@ introTypeCons ps t (TypeCons c ts) =
                     ct
   in insert c ct'
 
+inferEnv :: [(Ident, (), UExpr)] -> Typing [(Ident, Type, TExpr)]
+inferEnv env =
+  mapM (\(x, _, ce) -> do
+          ce' <- inferExpr ce
+          xt <- typeOfName x
+          unify xt (typeOf ce')
+          return (x, xt, ce'))
+    env
+
 inferFunction' :: UFunction -> [Type] -> Type -> Typing TFunction
 inferFunction' f prmTys retTy = do
   let prms = map (\((x, _), t) -> (x, MonoType t)) $ zip (fArgs f) prmTys
   e' <- scoped prms $ inferExpr $ fBody f
   unify (typeOf e') retTy
   fty <- realize $ TFun prmTys retTy
-  env' <- mapM (\(x,_ ) -> (\t -> (x, t)) <$> (typeOfName x)) $ fEnv f
+  env' <- inferEnv $ fEnv f
   return $ Function { fName = fName f
                     , fType = MonoType fty
                     , fEnv  = env'
@@ -276,9 +285,7 @@ inferExpr (ELam _ xs deps caps e0) = do
   prmTys <- mapM (const fresh) xs
   let prms = map fst xs
   let xs' = zipWith (\x t -> (x, MonoType t)) prms prmTys
-  caps' <- mapM (\(x, _) -> do
-                   t <- typeOfName x
-                   return (x, t)) caps
+  caps' <- inferEnv caps
   e0' <- scoped xs' $ inferExpr e0
   return $ ELam (TFun prmTys (typeOf e0')) (zip prms prmTys) deps caps' e0'
 

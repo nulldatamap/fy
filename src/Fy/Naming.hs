@@ -57,18 +57,24 @@ uniqId (Ident x ns _) = do
   modify (\s -> s { nstNext = n + 1 })
   return $ Ident x ns (Just n)
 
-block :: Naming a -> Naming (a, Set Ident, Set Ident)
-block x = do
+block0 :: (Int -> Int) -> Naming a -> Naming (a, Set Ident, Set Ident)
+block0 f x = do
   oldSt <- get
   modify (\s -> s { nstDeps = S.empty
                   , nstCaps = S.empty
-                  , nstDepth = 1 + (nstDepth oldSt) })
+                  , nstDepth = f $ nstDepth oldSt })
   r <- x
   st <- get
   modify (\s -> s { nstDeps = nstDeps oldSt
                   , nstCaps = nstCaps oldSt
                   , nstDepth = nstDepth oldSt })
   return (r, nstDeps st, nstCaps st)
+
+block :: Naming a -> Naming (a, Set Ident, Set Ident)
+block = block0 (+1)
+
+block' :: Naming a -> Naming (a, Set Ident, Set Ident)
+block' = block0 (max 1)
 
 addDep :: Ident -> Naming ()
 addDep x = modify (\s -> s { nstDeps = S.insert x (nstDeps s) })
@@ -161,8 +167,8 @@ checkBinding (Binding t x _ _ (Val e)) = do
   -- Does not (because we don't want to increase the depth through let-bindings)
   -- But specifically in the case of top-level value bindings we need to increase
   -- the depth, so that nested let-bindings aren't treated at globals
-  (e', deps, caps) <- block $ checkExpr e
-  bubbleUpCaps caps
+  (e', deps, caps) <- block' $ checkExpr e
+  mapM_ addCap caps
   return $ Binding t x' p deps (Val e')
 checkBinding (Binding t x _ _ (Fun f)) = do
    (NameEntry x' _) <- lookup x
@@ -216,14 +222,17 @@ useOrCap x = do
   curDepth <- nstDepth <$> get
   let n = neName ne
   ne' <- case neKind ne of
-           NKLocal d | d /= curDepth -> addCap n
+           NKLocal d | d < curDepth -> addCap n
            _ -> return ne
   addDep n
   return ne'
 
-bubbleUpCaps :: Set Ident -> Naming ()
-bubbleUpCaps xs =
-  mapM_ useOrCap xs
+captureNames :: Set Ident -> Naming [(Ident, (), Expr ())]
+captureNames caps = do
+  mapM (\cap -> do
+           capE <- checkExpr $ EIdent () cap
+           return (cap, (), capE))
+      (S.toList caps)
 
 checkExpr :: UExpr -> Naming UExpr
 checkExpr e =
@@ -249,19 +258,19 @@ checkExpr e =
       return $ ECase () e0' cs'
     ELam () xs _ _ e0 -> do
       ((xs', e0'), deps, caps) <- block $ scopedVars' (map fst xs) $ checkExpr e0
-      bubbleUpCaps caps
+      caps' <- captureNames caps
       mapM_ addDep deps
-      return $ ELam () (zip xs' $ repeat ()) deps (zip (S.toList caps) $ repeat ()) e0'
+      return $ ELam () (zip xs' $ repeat ()) deps caps' e0'
     _ -> return e
 
 checkFunction :: Ident -> [Ident] -> Publicity -> UExpr -> Naming UFunction
 checkFunction f xs p e = do
   ((xs', body), deps, caps) <- block $ scopedVars' xs $ checkExpr e
-  bubbleUpCaps caps
+  caps' <- captureNames caps
   return $ Function { fName = f
                     , fType = MonoType ()
                     , fArgs = map (\x -> (x, ())) xs'
-                    , fEnv  = zip (S.toList caps) $ repeat ()
+                    , fEnv  = caps'
                     , fPub  = p
                     , fDeps = deps
                     , fBody = body }

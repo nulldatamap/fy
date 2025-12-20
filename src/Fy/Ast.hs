@@ -69,7 +69,7 @@ data Binding t = Binding { bType :: TypeSchemeT t
 data Function t = Function { fName   :: Ident
                            , fType   :: TypeSchemeT t
                            , fArgs   :: [(Ident, t)]
-                           , fEnv    :: [(Ident, t)]
+                           , fEnv    :: [(Ident, t, Expr t)]
                            , fPub    :: Publicity
                            , fDeps   :: Set Ident
                            , fBody   :: Expr t }
@@ -99,7 +99,7 @@ data Expr t = ELit t Lit
             | ELet t [Binding t] (Expr t)
             | EIf t (Expr t) (Expr t) (Expr t)
             | ECase t (Expr t) [Case t]
-            | ELam t [(Ident, t)] (Set Ident) [(Ident, t)] (Expr t)
+            | ELam t [(Ident, t)] (Set Ident) [(Ident, t, Expr t)] (Expr t)
             -- Never parsed:
             | ELocal t Ident
             | ECapture t Ident

@@ -18,14 +18,16 @@ import Control.Monad.State
 import Control.Monad.RWS
 import qualified Data.HashMap.Strict as M
 
-data NameKind = NKBareFunc
-              | NKCloFunc
+data NameKind = NKBareFunc IRFPtrType
+              | NKCloFunc IRType
               | NKVal
+              deriving (Show)
 
 data LoweringSt = LoweringSt { lstNext  :: Int
                              , lstFuncs :: [IRFunc]
                              , lstNameKinds :: M.HashMap Ident NameKind
-                             , lstTypes :: M.HashMap Ident IRTypeDef }
+                             , lstTypes :: M.HashMap Ident IRTypeDef
+                             , lstExtraTypes :: [IRTypeDef] }
 
 type Lowering = RWS () [IRStmt] LoweringSt
 
@@ -40,7 +42,9 @@ runLowering m = fst $ evalRWS m () $
   LoweringSt { lstNext  = 0
              , lstFuncs = []
              , lstTypes = M.empty
-             , lstNameKinds = M.empty }
+             , lstNameKinds = M.empty
+             , lstExtraTypes = []
+             }
 
 newVar' :: (Maybe Text) -> Lowering Ident
 newVar' t = do
@@ -187,8 +191,29 @@ lowerFunType (TCons t _) = do
     _ -> error $ "Expected a function type: " ++ (show t)
 lowerFunType t@(TVar _) = error $ "Expected function type: " ++ (show t)
 
+lowerClosure :: (Maybe IRType) -> Ident -> [(Ident, Type, TExpr)] -> Lowering IRExpr
+lowerClosure t f env = do
+  e <- sequence $
+         (\t0 -> do
+            es <- mapM (\(_, _, ee) -> lowerExpr ee) env
+            irCons t0 (mkId "") $ es) <$> t
+  return $ IRClosure f e
+
 lowerExpr :: TExpr -> Lowering IRExpr
-lowerExpr e =
+lowerExpr e = do
+  e' <- lowerExpr0 e
+  case e' of
+    IRVar x -> do
+      nk <- nameKind x
+      case nk of
+        NKVal -> return e'
+        NKCloFunc _ -> error $ "Bare function name referenced, but it's a closure function: " ++ (show e)
+        NKBareFunc fty -> lowerClosure Nothing x []
+    _ -> return e'
+
+-- Doesn't do closure lifting
+lowerExpr0 :: TExpr -> Lowering IRExpr
+lowerExpr0 e =
   case e of
     ELit _ l -> return $ IRLit $ lowerLit l
     EBuiltin _ _ -> error $ "Bare operatior: " ++ (show e)
@@ -197,8 +222,7 @@ lowerExpr e =
       irCons t' (mkId cn) []
     ELocal _ x -> return $ IRVar x
     EGlobal _ x -> return $ IRVar x
-    -- TODO:
-    ECapture _ x -> return $ IRVar x
+    ECapture _ x -> return $ IREnv x
     EIdent _ _ -> error $ "EIdent found during lowering: " ++ (show e)
     EApp _ (EBuiltin _ b) xs -> do
       xs' <- mapM lowerExpr xs
@@ -214,15 +238,16 @@ lowerExpr e =
           t' <- lowerType t
           irCons t' (mkId cn) xs'
         _ -> do
-          fe' <- lowerExpr fe
+          fe' <- lowerExpr0 fe
           fty <- (uncurry IRFPtrType) <$> (lowerFunType (typeOf fe))
           c <- case fe' of
                  IRVar fx -> do
                    nk <- nameKind fx
                    case nk of
                      NKVal -> return $ IRInvoke fty fe'
-                     NKCloFunc -> error $ "Bare function name referenced, but it's a closure function: " ++ (show fe)
-                     NKBareFunc -> return $ IRCall fx
+                     NKCloFunc _ ->
+                       error $ "Bare function name referenced, but it's a closure function: " ++ (show fe)
+                     NKBareFunc _ -> return $ IRCall fx
                  _ -> return $ IRInvoke fty fe'
           return $ c xs'
     ELet _ ls e0 -> do
@@ -245,16 +270,15 @@ lowerExpr e =
       x <- spillExpr "_matchee" e0
       lowerCases x t cs
     ELam t xs deps env e0 -> do
-      fn <- newVar' (Just "__clo")
-      _ <- lowerFunction $ Function { fName = fn
+      fn <- newVar' (Just "__clof")
+      f <- lowerFunction $ Function { fName = fn
                                     , fType = MonoType t
                                     , fArgs = xs
                                     , fEnv  = env
                                     , fPub  = Private
                                     , fDeps = deps
                                     , fBody = e0 }
-      -- TODO: Properly capture instead of just referneces (this doesn't respect nested captures)
-      return $ IRClosure fn $ map (IRVar . fst) env
+      lowerClosure (irfEnv f) fn env
     _ -> error $ "Lowering is not yet supported for: " ++ (show e)
 
 lookupTypeDef :: Ident -> Lowering IRTypeDef
@@ -339,26 +363,45 @@ lowerBody b = do
   r <- lowerExpr b
   tell [ IRReturn r ]
 
+lowerEnvType :: Ident -> [(Ident, Type, TExpr)] -> Lowering IRType
+lowerEnvType fn env = do
+  let tn = fn `suffixId` "_env"
+  flds <- mapM (\(x, t, _) -> do
+                   t' <- lowerType t
+                   return (t', x))
+            env
+  let td = IRTypeDef tn S.empty True $ IRStructType $ IRRecord (mkId "") flds
+  modify (\s -> s { lstTypes = M.insert tn td $ lstTypes s
+                  , lstExtraTypes = td : (lstExtraTypes s) })
+  return $ IRType tn
+
 lowerFunction :: TFunction -> Lowering IRFunc
 lowerFunction f = do
-  let fn = fName f
-  if null $ fEnv f
-  then declareName fn NKBareFunc
-  else declareName fn NKCloFunc
-
   let fty = case fType f of
               MonoType mt -> mt
               PolyType _ pt -> pt
   let (_, retT) = case unFn fty of
                     Nothing -> error "Type of function isn't a arrow type!"
                     Just x -> x
-  (_, body) <- stmts $ lowerBody $ fBody f
   argsTs <- mapM (\(x, t) -> ((,) x) <$> (lowerType t)) $ fArgs f
   retT' <- lowerType retT
+
+  let fn = fName f
+  envTy <- if null $ fEnv f
+           then do
+             declareName fn $ NKBareFunc $ IRFPtrType retT' $ map snd argsTs
+             return Nothing
+           else do
+             et <- lowerEnvType fn $ fEnv f
+             declareName fn $ NKCloFunc et
+             return $ Just et
+
+  (_, body) <- stmts $ lowerBody $ fBody f
   let f' = IRFunc { irfName  = fn
                   , irfPub   = fPub f
                   , irfRetTy = retT'
                   , irfArgs  = argsTs
+                  , irfEnv   = envTy
                   , irfDeps  = fDeps f
                   , irfBody  = body }
   modify (\s -> s { lstFuncs = f' : (lstFuncs s) })
@@ -445,11 +488,12 @@ lowerModule m = do
                                         Binding { bBody = (Fun f) } -> Right f
                                         _ -> Left b)
                          (mItems m)
-  (vs, inits) <- lowerVals vals
   mapM_ lowerFunction $ funs
+  (vs, inits) <- lowerVals vals
   fs <- lstFuncs <$> get
+  ets <- lstExtraTypes <$> get
   return $ IRProgram { irpName  = mName m
-                     , irpTypes = tds'
+                     , irpTypes = tds' ++ ets
                      , irpFuncs = reverse fs
                      , irpVars  = vs
                      , irpInit  = inits }

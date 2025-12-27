@@ -2,7 +2,6 @@ module Fy.Naming
   ( namingCheck
   ) where
 
-
 import Fy.Types
 import Fy.Ast
 
@@ -344,7 +343,9 @@ checkModule m = do
 
 namingCheck :: UModule -> Either NamingError UModule
 namingCheck m = runNaming M.empty $ do
+  modify (\s -> s { nstNext = mNextId m })
   m' <- checkModule m
   caps <- nstCaps <$> get
   unless (S.null caps) $ throwError $ InvalidCaptures $ S.toList caps
-  return m'
+  nid <- nstNext <$> get
+  return $ m' { mNextId = nid }

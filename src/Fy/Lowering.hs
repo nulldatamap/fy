@@ -18,6 +18,8 @@ import Control.Monad.State
 import Control.Monad.RWS
 import qualified Data.HashMap.Strict as M
 
+import Debug.Trace (trace)
+
 data NameKind = NKBareFunc IRFPtrType
               | NKCloFunc IRType
               | NKVal
@@ -191,12 +193,12 @@ lowerFunType (TCons t _) = do
     _ -> error $ "Expected a function type: " ++ (show t)
 lowerFunType t@(TVar _) = error $ "Expected function type: " ++ (show t)
 
-lowerClosure :: (Maybe IRType) -> Ident -> [(Ident, Type, TExpr)] -> Lowering IRExpr
-lowerClosure t f env = do
+lowerClosure :: (Maybe IRType) -> Ident -> [TExpr] -> Lowering IRExpr
+lowerClosure t f es = do
   e <- sequence $
          (\t0 -> do
-            es <- mapM (\(_, _, ee) -> lowerExpr ee) env
-            irCons t0 (mkId "") $ es) <$> t
+            es' <- mapM lowerExpr es
+            irCons t0 (mkId "") es') <$> t
   return $ IRClosure f e
 
 lowerExpr :: TExpr -> Lowering IRExpr
@@ -269,16 +271,11 @@ lowerExpr0 e =
     ECase t e0 cs -> do
       x <- spillExpr "_matchee" e0
       lowerCases x t cs
-    ELam t xs deps env e0 -> do
-      fn <- newVar' (Just "__clof")
-      f <- lowerFunction $ Function { fName = fn
-                                    , fType = MonoType t
-                                    , fArgs = xs
-                                    , fEnv  = env
-                                    , fPub  = Private
-                                    , fDeps = deps
-                                    , fBody = e0 }
-      lowerClosure (irfEnv f) fn env
+    EClo _ f es -> do
+      nk <- nameKind f
+      case nk of
+        NKCloFunc ct -> lowerClosure (Just ct) f es
+        _ -> error $ "Closure " ++ (show e) ++ " doesn't refer to a closure function: " ++ (show nk)
     _ -> error $ "Lowering is not yet supported for: " ++ (show e)
 
 lookupTypeDef :: Ident -> Lowering IRTypeDef

@@ -241,7 +241,7 @@ pModule = do
                  <|> ((singleton . IKTypeDef) <$> pTypeDef)
                  <|> ((singleton . IKFunc) <$> pBinding))
   let (ins, outs, tys, bs) = intoBuckets $ concat items
-  return $ Module name ins outs tys bs
+  return $ Module name ins outs tys bs 0
   where
     intoBuckets items =
       foldr (\ik (ins, outs, tys, bs) ->

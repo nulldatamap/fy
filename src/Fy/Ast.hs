@@ -32,7 +32,8 @@ data Module t = Module { mName :: Ident
                        , mImports :: [PathItem]
                        , mExports :: [PathItem]
                        , mTypeDefs :: [TypeDef]
-                       , mItems :: [Binding t] }
+                       , mItems :: [Binding t]
+                       , mNextId :: Int }
   deriving (Show)
 
 data TypeCons = TypeCons { tdcName :: Ident, tdcMembers :: [Type] }
@@ -94,13 +95,18 @@ data Case t = Case { cPat :: Pat t
 data Expr t = ELit t Lit
             | ETup t [Expr t]
             | EBuiltin t Builtin
-            | EIdent t Ident
             | EApp t (Expr t) [Expr t]
-            | ELet t [Binding t] (Expr t)
             | EIf t (Expr t) (Expr t) (Expr t)
             | ECase t (Expr t) [Case t]
+            -- Post normalization this only occurs at the root of a scope
+            | ELet t [Binding t] (Expr t)
+            -- Turned into local, global, cons or capture by Naming
+            | EIdent t Ident
+            -- Turned into a top-level function and EClo by Normalization
             | ELam t [(Ident, t)] (Set Ident) [(Ident, t, Expr t)] (Expr t)
+
             -- Never parsed:
+            | EClo t Ident [Expr t]
             | ELocal t Ident
             | ECapture t Ident
             | EGlobal t Ident
@@ -137,6 +143,7 @@ instance Typed Expr where
   withType f x@(EIf t _ _ _) = f t x
   withType f x@(ECase t _ _) = f t x
   withType f x@(ETup t _) = f t x
+  withType f x@(EClo t _ _) = f t x
 
 instance Typed Pat where
   withType f x@(PHole t) = f t x
@@ -203,7 +210,8 @@ data AstVisitor m t =
              , avPreCase :: Case t -> m (Case t)
              , avPostCase :: Case t -> m (Case t)
              , avPrePat :: Pat t -> m (Pat t)
-             , avPostPat :: Pat t -> m (Pat t) }
+             , avPostPat :: Pat t -> m (Pat t)
+             }
 
 newVisitor :: Monad m => AstVisitor m t
 -- Oh dear dear:
@@ -244,7 +252,8 @@ visitExpr v e = do
            EIf t e0 e1 e2 -> (EIf t) <$> (recur e0) <*> (recur e1) <*> (recur e2)
            ECase t e0 cs -> (ECase t) <$> (recur e0) <*> (mapM (visitCase v) cs)
            ELam t xs deps caps e0 -> (ELam t xs deps caps) <$> (recur e0)
-           _ -> return e
+           EClo t n es -> (EClo t n) <$> (mapM recur es)
+           _ -> return e'
   avPostExpr v e''
   where
     recur = visitExpr v

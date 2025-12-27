@@ -164,9 +164,11 @@ instance (Show t, TypeAnn t) => CPretty (Expr t) where
   cpretty (ECons t x) = parens $ (ccn $ cpretty x) `prettyTypeAnn` t
   cpretty (ELam t xs deps caps e) =
     (parens $ "\\" <> (sep $ (align $ sep $ map (clc . cpretty . fst) xs) : (prettyDeps deps)
-                               ++ (prettyBindings (map (\(cx, ct, _) -> (cx, ct)) caps) (Just "env:"))
+                               ++ [cig $ ("env:" <> (braced $ map (\(n, t, c) -> (cpretty n) <+> ":" <+> (cpretty t) <+> "=" <+> (cpretty c)) caps))] -- (prettyBindings (map (\(cx, ct, _) -> (cx, ct)) caps) (Just "env:"))
                                ++ [ "->", hng $ cpretty e]))
       `prettyTypeAnn` t
+  cpretty (EClo t f es) =
+    (parens $ (ckw "clo") <+> (align $ (cgl (cpretty f)) <+> (sep $ map cpretty es))) `prettyTypeAnn` t
 
 instance CPretty PathItem where
   cpretty (PathItem ps h alias) = hsep $ path : al
@@ -198,7 +200,7 @@ instance CPretty TypeDef where
                      ++ [align $ sep ["=", cpretty b]])
 
 instance (Show t, TypeAnn t) => CPretty (Module t) where
-  cpretty (Module n im ex ts is) =
+  cpretty (Module n im ex ts is _) =
     vsep $ (cdf $ cpretty n) : (exDoc ++ imDoc ++ (map cpretty ts) ++ (map cpretty is))
     where
       imDoc = map (\x -> "<-" <+> (cpretty x)) im

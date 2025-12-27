@@ -1,8 +1,11 @@
 Test
-. main () = (binding_captures ()) ()
+. main () =
+  $$add
+    ((binding_captures0 ()) ())
+    ((binding_captures ()) ())
 . binding_captures = (x
+  . y = 99
+  . x = \z -> (x . x = \z -> y))
+. binding_captures0 = (x
   . y = 1
-  . x = \ -> (x . x = \ -> y))
--- . binding_captures0 = (x
---   . y = 1
---   . x = (x . x () = y))
+  . x a = (x . x b = y))

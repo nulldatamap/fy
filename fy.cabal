@@ -32,10 +32,12 @@ library
       Fy.Lowering
       Fy.Mono
       Fy.Naming
+      Fy.Normalize
       Fy.Parser
       Fy.Pretty
       Fy.Types
       Fy.Typing
+      Fy.Uniq
       Fy.Util
   other-modules:
       Paths_fy

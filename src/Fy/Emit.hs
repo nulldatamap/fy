@@ -101,7 +101,7 @@ emitProgram p = runEmitter $ withTypesAndFuncs p $ do
     indent
     emitIdent (irpName p)
     line "__init();"
-    lines [ "  printf(\"Result: %d\\n\", __main());"
+    lines [ "  printf(\"Result: %d\\n\", __Xmain());"
           , "  return 0;" ]
   line "\n"
 
@@ -273,7 +273,7 @@ emitIdent' :: Ident -> Emitter ()
 emitIdent' x = emit $ canonicalId x
 
 emitIdent :: Ident -> Emitter ()
-emitIdent x = emit "__" >> (emit $ canonicalId x)
+emitIdent x = emit "__X" >> (emit $ canonicalId x)
 
 emitType :: IRType -> Emitter ()
 emitType (IRType (Ident "int" [] Nothing)) = emit "int"

@@ -3,9 +3,10 @@ module Fy.Types
      , TyVar, Ident(..), Type(..), TypeSchemeT(..), TypeScheme
      , Context(..)
      , mkId, suffixId, canonicalId, enumeratedIds
-     , unnamedFields, variantField, typeName
+     , unnamedFields, variantField, typeName, toPoly
      , builtinTypeNames, isBuiltinType, bare, ununiq
      , encodeType, unFn, isFnTy, tUnit, tInt, tBool
+     , innerType
      ) where
 
 import Prelude hiding (lookup, lines)
@@ -182,6 +183,16 @@ unFn _ = Nothing
 isFnTy :: Type -> Bool
 isFnTy (TFun _ _) = True
 isFnTy _          = False
+
+toPoly :: Type -> TypeScheme
+toPoly t =
+  case S.toList $ freeVars t of
+    [] -> MonoType t
+    ts -> PolyType ts t
+
+innerType :: TypeScheme -> Type
+innerType (MonoType t0) = t0
+innerType (PolyType _ t0) = t0
 
 encodeType :: TypeScheme -> Text
 encodeType t =

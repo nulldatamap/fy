@@ -17,6 +17,7 @@ import Fy.Ast
 import Fy.Parser
 import Fy.Naming
 import Fy.Typing
+import Fy.Normalize
 import Fy.Mono
 import Fy.Ir
 import Fy.Lowering
@@ -74,8 +75,9 @@ irPass n p out err =
               _ -> error $ "Expect ir input for pass: " ++ (show n))
 
 -- TODO:
+-- - Bug fixes:
+--   - Fix nilary vs called-with-unit
 -- - Language features:
---   - Lambdas
 --   - Type annotations
 --   - Type parameter usage (for types)
 --   - Name aliases
@@ -85,7 +87,6 @@ irPass n p out err =
 --   - Tuples
 --   - Records
 --   - @-patterns
---   - Closures
 --   - "Effects"
 --   - Effect handlers
 --   - Traits
@@ -114,6 +115,7 @@ passes =
   [ sourcePass "Parsing"          parseModule            RUAst errorBundlePretty
   , uastPass   "Name resolution"  namingCheck            RUAst show
   , uastPass   "Type inference"   infer                  RTAst show
+  , tastPass   "Normalization"    (Right . normalize)    RTAst id
   , tastPass   "Monomorphisation" (Right . monomorphise) RTAst id
   , tastPass   "Lowering"         (Right . lowerToIR)    RIr   id
   , irPass     "Emit C"           (Right . emitProgram)  RC    id ]

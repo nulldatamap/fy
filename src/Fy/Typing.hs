@@ -318,4 +318,4 @@ infer :: UModule -> Either TypingError TModule
 infer m = runTyping $ do
     mapM_ introTypeConses $ mTypeDefs m
     is <- inferBindings (mItems m) return
-    realize $ Module (mName m) (mImports m) (mExports m) (mTypeDefs m) is
+    realize $ Module (mName m) (mImports m) (mExports m) (mTypeDefs m) is (mNextId m)

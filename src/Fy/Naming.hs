@@ -10,7 +10,7 @@ import qualified Data.Set as S
 import Data.List (elemIndex, unsnoc)
 import Data.Set (Set)
 import Control.Monad (when, unless, foldM)
-import Control.Monad.State
+import Control.Monad.State.Strict
 import Control.Monad.Except
 import qualified Data.HashMap.Strict as M
 

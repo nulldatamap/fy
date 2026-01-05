@@ -15,7 +15,7 @@ import qualified Data.HashMap.Strict as M
 import Data.Maybe (maybeToList)
 import Data.List (intersperse)
 import Control.Monad (when, unless)
-import Control.Monad.RWS
+import Control.Monad.RWS.Strict
 
 data EmitterSt = EmitterSt {  estSeenNames :: Set Ident }
 
@@ -88,7 +88,7 @@ emitProgram p = runEmitter $ withTypesAndFuncs p $ do
         , "#define __FY_CLO(__ARG_f, __ARG_e) ((__fy_clo) { (void(*)(void))__ARG_f, (void*)__ARG_e })"
         , ""
         , "void* __fy_alloc(size_t sz) { return malloc(sz); }"
-        , "#define ALLOC(__ARG_t, __ARG_x, __ARG_v) __ARG_t __ARG_x = (__ARG_t)__fy_alloc(sizeof(*__ARG_x)); *__ARG_x = __ARG_v;"
+        , "#define ALLOC(__ARG_t, __ARG_x, __ARG_vt, __ARG_v) __ARG_t __ARG_x = (__ARG_t)__fy_alloc(sizeof(__ARG_vt)); *((__ARG_vt*)__ARG_x) = __ARG_v;"
         ]
   emitTypeDefs $ irpTypes p
   mapM_ emitVarDecl $ irpVars p
@@ -180,9 +180,10 @@ emitStmt (IRDef t x mE) = do
   mapM_ (\e -> (emit " = ") >> emitExpr e) mE
   emit ";"
 emitStmt (IRSet x e) = (emitIdent x) >> (emit " = ") >> (emitExpr e) >> (emit ";")
-emitStmt (IRBox t x e) = do
+emitStmt (IRBox tt x it e) = do
   emit "ALLOC"
-  parens $ (emitType t) >> (emit ", ") >> (emitIdent x) >> (emit ", ") >> (emitExpr e)
+  parens $ (emitType tt) >> (emit ", ") >> (emitIdent x)
+           >> (emit ", ") >> (emitType it) >>  (emit ", ") >> (emitExpr e)
   emit ";"
 
 emitStmt (IREval e) = (emitExpr e) >> (emit ";")
@@ -227,7 +228,11 @@ emitExpr (IRCons (IRType tn) x es) = do
   emitIdent' x
   parens $ seperated ", " emitExpr es
 emitExpr (IRCons t _ _) = error $ "Invalid cons type: " ++ (show t)
-emitExpr (IRUnbox e) = parens $ emit "*" >> emitExpr e
+emitExpr (IRUnbox t e) = parens $ emit "*" >> cast >> emitExpr e
+  where
+    cast = case t of
+             Nothing -> return ()
+             Just t  -> parens $ (emitType t) >> (emit "*")
 emitExpr (IRCall x es) = do
   emitIdent x
   parens $ seperated ", " emitExpr es
@@ -235,7 +240,8 @@ emitExpr (IRField e f) = do
   let (mParen, s, e') = case e of
                           IRField _ _ -> (id, ".", e)
                           IRVar _     -> (id, ".", e)
-                          IRUnbox e0  -> (id, "->", e0)
+                          IRUnbox Nothing e0 ->
+                            (id, "->", e0)
                           _           -> (parens, ".", e)
   mParen $ emitExpr e'
   emit s
@@ -367,7 +373,7 @@ emitTypeDef (IRTypeDef t rg isBoxed b) = do
       emit " "
       emitIdent t
       line ";\n"
-    IRFunType rt ts -> do
+    IRFunType (IRFPtrType rt ts) -> do
       emit "typedef "
       emitType rt
       emit " "
@@ -384,7 +390,7 @@ emitTypeDef (IRTypeDef t rg isBoxed b) = do
 emitConses :: IRTypeDef -> Emitter ()
 emitConses (IRTypeDef tn _ isBoxed b) =
   case b of
-    IRFunType _ _ -> return ()
+    IRFunType _ -> return ()
     IRCType _ -> return ()
     IRTypeAlias _ -> return ()
     IREnumType variants -> do

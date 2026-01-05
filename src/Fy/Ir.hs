@@ -4,7 +4,7 @@ module Fy.Ir
   , IRType(..), IRTypeDef(..), IRRecord(..), IRTypeBody(..)
   , IRVarDecl(..), IRLit(..), IRExpr(..), IRStmt(..), IRFunc(..)
   , IRProgram(..), Publicity(..)
-  , irtUnit
+  , irtUnit, irtInt
   ) where
 
 
@@ -34,7 +34,7 @@ data IRTypeBody = IREnumType [Ident]
                 | IRStructType IRRecord
                 | IRTaggedType [IRRecord]
                 | IRCType Text
-                | IRFunType IRType [IRType]
+                | IRFunType IRFPtrType
                 | IRTypeAlias IRType
                 deriving Show
 
@@ -57,13 +57,13 @@ data IRExpr = IRVar Ident
             | IRCons IRType Ident [IRExpr]
             | IRLit IRLit
             | IREnv Ident
-            | IRUnbox IRExpr
+            | IRUnbox (Maybe IRType) IRExpr
             | IRField IRExpr Ident
             | IRCheckVariant IRExpr Ident
             deriving (Show)
 
 data IRStmt = IRDef IRType Ident (Maybe IRExpr)
-            | IRBox IRType Ident IRExpr
+            | IRBox IRType Ident IRType IRExpr
             | IRSet Ident IRExpr
             | IREval IRExpr
             | IRReturn IRExpr
@@ -91,6 +91,9 @@ data IRProgram = IRProgram { irpName  :: Ident
                            , irpVars  :: [IRVarDecl]
                            , irpInit  :: [IRStmt] }
             deriving (Show)
+
+irtInt :: IRType
+irtInt = IRType (Ident "int" [] Nothing)
 
 irtUnit :: IRType
 irtUnit = IRType (Ident "()" [] Nothing)

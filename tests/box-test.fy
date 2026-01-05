@@ -1,4 +1,4 @@
 BoxTest
 
-. main () = (id id) 0
+. main () = (id id) 99  -- ((id id) (id id)) 99
 . id x = x

@@ -8,7 +8,7 @@ import Fy.Typing hiding (instanciate)
 import Fy.Uniq
 
 import Control.Monad
-import Control.Monad.State
+import Control.Monad.State.Strict
 import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
 import Data.Maybe (isNothing)
@@ -18,7 +18,7 @@ import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Graph (stronglyConnComp, flattenSCCs, SCC(..))
 
-import Debug.Trace (trace)
+import Fy.Pretty
 
 data MonoSt = MonoSt { mstKnownTypes :: M.HashMap Ident TypeDef
                      , mstTypeInsts  :: M.HashMap Type TypeDef
@@ -113,7 +113,7 @@ instanciateBinding' x t = do
           Nothing -> return Nothing
           Just (b, d) ->
             case bType b of
-              MonoType _ -> return $ Just x
+              MonoType _ -> return $ Just $ bName b
               PolyType _ rt -> do
                 nid <- mstNext <$> get
                 let (bFresh, nid') = runUniq nid (uniqBinding b)
@@ -234,7 +234,7 @@ monoExpr e =
     monoName :: (Type -> Ident -> TExpr) -> Type -> Ident -> Mono TExpr
     monoName c t x = do
       t' <- monoType' t
-      x' <- monoName' t' x
+      x' <- monoName' t x
       return $ c t' x'
     monoName' :: Type -> Ident -> Mono Ident
     monoName' t x = do
@@ -278,9 +278,6 @@ monoBinding b@(Binding { bBody = Val e, bType = t }) = do
   let b' = b { bBody = Val e'
              , bDeps = newDeps
              , bType = t' }
-  let t0 = case t' of
-             MonoType t0 -> t0
-             PolyType _ t0 -> t0
   return b'
 monoBinding b@(Binding { bBody = Fun f }) = do
   -- The binding might have been renamed and we'll propagate that here
@@ -315,8 +312,8 @@ monoModule m = do
   insts <- (M.elems . mstBindingInsts) <$> get
   tds' <- (orderTypeDefs . (tds ++) . M.elems . mstTypeInsts) <$> get
   nid <- mstNext <$> get
-  return $ m { mItems = orderBindings $ (map fst insts) ++ bs'
-             , mTypeDefs = tds'
+  return $ m { mItems = orderBindings $ mItems m -- $ (map fst insts) ++ bs'
+             , mTypeDefs = orderedTds -- tds'
              , mNextId = nid }
 
 monomorphise :: TModule -> TModule

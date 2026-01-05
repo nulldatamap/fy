@@ -6,7 +6,7 @@ import Fy.Types hiding (subst)
 import Fy.Ast
 
 import qualified Data.HashMap.Strict as M
-import Control.Monad.State
+import Control.Monad.State.Strict
 
 data UniqSt = UniqSt { ustNext   :: Int
                      , ustSubsts :: M.HashMap Ident Ident }

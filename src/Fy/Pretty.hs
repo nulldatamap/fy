@@ -122,7 +122,7 @@ instance (Show t, TypeAnn t) => CPretty (Binding t) where
       Val e -> "." <+> (align $ sep $ [(cdf $ cpretty n) `prettyTypeAnn` t]
                                         ++ prettyDeps deps
                                         ++ [nst $ sep ["=", cpretty e]])
-      Fun f -> "." <+> cpretty f
+      Fun f -> "." <+> (cpretty f)
 
 instance (Show t, TypeAnn t) => CPretty (Function t) where
   cpretty (Function n t args env _ deps b) =
@@ -222,7 +222,7 @@ instance CPretty IRTypeBody where
   cpretty (IRStructType r) = (ckw "struct") <+> (cpretty r)
   cpretty (IRTaggedType rs) = align $ vsep $ map (\r -> (ckw "tag") <+> (cpretty r)) rs
   cpretty (IRCType c) = (ckw "ctype") <+> (cbi $ cpretty c)
-  cpretty (IRFunType t ts) = (ckw "fptr") <+> (align $ tupled $ map cpretty ts) <+> "->" <+> (cpretty t)
+  cpretty (IRFunType f) = cpretty f
   cpretty (IRTypeAlias t) = (ckw "alias") <+> (cpretty t)
 
 instance CPretty IRTypeDef where
@@ -245,7 +245,8 @@ instance CPretty IRExpr where
   cpretty (IROp o es) = (cbi $ cpretty o) <> (align $ tupled $ map cpretty es)
   cpretty (IRCall x es) = (cgl $ cpretty x) <> (align $ tupled $ map cpretty es)
   cpretty (IRInvoke fty e es) = (parens $ (cpretty e) <+> ":" <+> (cpretty fty)) <> (hng $ tupled $ map cpretty es)
-  cpretty (IRUnbox e) = (ckw "unbox") <> (parens $ cpretty e)
+  cpretty (IRUnbox Nothing e) = (ckw "unbox") <> (parens $ cpretty e)
+  cpretty (IRUnbox (Just t) e) = (ckw "unbox") <> (parens $ cpretty t) <> (parens $ cpretty e)
   cpretty (IRCons t x es) = (ccn $ (cpretty t) <> "/" <> (cpretty x)) <> (hng $ tupled $ map cpretty es)
   cpretty (IRLit l) = cpretty l
   cpretty (IRField e x) = (cpretty e) <> "." <> (cpretty x)
@@ -262,8 +263,8 @@ instance CPretty IRStmt where
           Just x -> ["=" <+> (cpretty x)]
   cpretty (IRSet x e) = hsep $ [clc $ cpretty x, "<-", cpretty e]
   cpretty (IREval e) = cpretty e
-  cpretty (IRBox t n e) =
-    hsep $ [ckw "var", clc $ cpretty n, ":", cpretty t, "=", ckw "box", cpretty e]
+  cpretty (IRBox tt n _ e) =
+    hsep $ [ckw "var", clc $ cpretty n, ":", cpretty tt, "=", ckw "box", cpretty e]
   cpretty (IRReturn e) = hsep $ [ckw "return", cpretty e]
   cpretty (IRIf e0 st0 [th@(IRIf _ _ _)]) =
     hsep $ [ ckw "if", cpretty e0

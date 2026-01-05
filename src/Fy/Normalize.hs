@@ -9,7 +9,7 @@ import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as T
-import Control.Monad.State
+import Control.Monad.State.Strict
 
 data NormSt = NormSt { nstGlobals :: [TBinding]
                      , nstLocals  :: [([TBinding], Set Ident)]

@@ -78,13 +78,7 @@ irPass n p out err =
 -- - Bug fixes:
 --   - Fix nilary vs called-with-unit
 -- - Language features:
---   - Type annotations
---   - Type parameter usage (for types)
---   - Name aliases
 --   - Module system
---   - Guards?
---   - Zero types
---   - Tuples
 --   - Records
 --   - @-patterns
 --   - "Effects"
@@ -92,11 +86,18 @@ irPass n p out err =
 --   - Traits
 --   - Trait boxing
 --   - Infix operators
---   - Pipe operators
 --   - GC Roots
 --   - GC
 --   - Pattern completeness checks
---   - Binding pattern-matching
+--   - Minor:
+--     - Guards?
+--     - Type annotations
+--     - Type parameter usage (for types)
+--     - Name aliases
+--     - Zero types
+--     - Tuples
+--     - Binding pattern-matching
+--     - Pipe operators
 -- - Optimizations:
 --   - Better boxing heuristics
 --   - Dead code elim

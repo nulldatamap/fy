@@ -12,7 +12,7 @@ import qualified Data.Set as S
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import Control.Monad (when)
-import Control.Monad.State
+import Control.Monad.State.Strict
 import Control.Monad.Except
 import Data.Graph (stronglyConnComp, SCC(..))
 import qualified Data.HashMap.Strict as M
@@ -217,7 +217,7 @@ inferWithSccBindings ((NECyclicSCC xs0:ls)) innerF ls' = do
                        MonoType fty -> do
                          fty' <- generalize =<< realize fty
                          f' <- realize $ f { fType = fty' }
-                         return (l { bBody = Fun f' }, fType f')
+                         return (l { bBody = Fun f', bType = fType f' }, fType f')
                        _ -> error $ "Expected monotype: " ++ (show f))
            xs'
   -- And do the rest

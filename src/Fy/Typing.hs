@@ -1,5 +1,5 @@
 module Fy.Typing
-  ( runTyping, unify, realize, instanciate, generalize
+  ( runTyping, unify, realize, instanciate, generalize, fresh', fresh, (=:=)
   , infer
   ) where
 

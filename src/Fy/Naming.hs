@@ -284,6 +284,7 @@ checkType ps (TCons x ts) = do
     Just _ -> error "Can't use a type-variable as a constructor"
     _ -> (TCons x) <$> mapM (checkType ps) ts
 checkType ps (TFun ts t) = TFun <$> (mapM (checkType ps) ts) <*> (checkType ps t)
+checkType _ t@(TBox _) = error $ "Unexpected box-type: " ++ (show t)
 
 checkTypeDef :: TypeDef -> Naming TypeDef
 checkTypeDef td = do

@@ -212,7 +212,7 @@ lowerFunType (TCons t _) = do
   case irtdBody td of
     IRFunType (IRFPtrType ts rt) -> return (ts, rt)
     _ -> error $ "Expected a function type: " ++ (show t)
-lowerFunType t@(TVar _) = error $ "Expected function type: " ++ (show t)
+lowerFunType t = error $ "Expected function type: " ++ (show t)
 
 lowerClosure :: (Maybe IRType) -> Ident -> [TExpr] -> Lowering (IRExpr, IRType)
 lowerClosure t f es = do
@@ -340,7 +340,8 @@ lowerType' rg (TCons x _) | S.member x rg = return $ IRType x
 lowerType' _ t = lowerType t
 
 lowerType :: Type -> Lowering IRType
-lowerType (TVar _) = return IRBoxType
+lowerType (TBox _) = return IRBoxType
+lowerType t@(TVar _) = error $ "Unexpected bare type variable: " ++ (show t)
 lowerType t@(TCons x []) | isBuiltinType t = return $ IRType x
 lowerType (TCons t _) = do
   td <- lookupTypeDef t

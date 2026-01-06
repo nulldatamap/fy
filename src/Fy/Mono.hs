@@ -151,6 +151,7 @@ monoType' t = monoType t
 
 monoType :: Type -> Mono Type
 monoType t | isBuiltinType t = return t
+monoType t@(TBox _) = error $ "Unexpected box-type: " ++ (show t)
 monoType t@(TVar _) = return t
 monoType t@(TCons _ []) = return t
 monoType (TFun ts rt) = do
@@ -301,6 +302,23 @@ orderBindings bs =
   let bGraph = map (\b -> (b, bName b, S.toList $ bDeps b)) bs
   in (\x -> x) $ flattenSCCs $ stronglyConnComp bGraph
 
+boxFreeVars :: TBinding -> Mono TBinding
+boxFreeVars b = do
+  case runTyping go of
+    Left err -> error $ "Failed to box free vars: " ++ (show err)
+    Right b' -> return b'
+  where
+    vs = freeVars $ bType b
+    go = do
+      mapM_ (\v -> do
+                v' <- fresh
+                v =:= (TBox v'))
+        vs
+      b' <- realize b
+      bt <- generalize $ innerType $ bType b
+      return $ b' { bType = bt }
+
+
 monoModule :: TModule -> Mono TModule
 monoModule m = do
   modify (\s -> s { mstNext = mNextId m })
@@ -312,7 +330,8 @@ monoModule m = do
   insts <- (M.elems . mstBindingInsts) <$> get
   tds' <- (orderTypeDefs . (tds ++) . M.elems . mstTypeInsts) <$> get
   nid <- mstNext <$> get
-  return $ m { mItems = orderBindings $ mItems m -- $ (map fst insts) ++ bs'
+  items' <- mapM boxFreeVars $ mItems m
+  return $ m { mItems = orderBindings $ items' -- $ (map fst insts) ++ bs'
              , mTypeDefs = orderedTds -- tds'
              , mNextId = nid }
 

@@ -33,6 +33,7 @@ type TyVar = Int
 data Type = TVar TyVar
           | TCons Ident [Type]
           | TFun [Type] Type
+          | TBox Type
           deriving (Eq, Generic)
 
 deriving instance Hashable Type
@@ -96,6 +97,7 @@ instance FreeVars Type where
     freeVars (TVar x) = S.singleton x
     freeVars (TCons _ ts) = foldMap freeVars ts
     freeVars (TFun ts t) = (foldMap freeVars ts) `S.union` (freeVars t)
+    freeVars (TBox t) = freeVars t
 
 instance FreeVars TypeScheme where
   freeVars (MonoType t) = freeVars t
@@ -108,6 +110,7 @@ instance Substitutable Type where
     subst (Subst m) (TVar x) = fromMaybe (TVar x) $ M.lookup x m
     subst s (TCons k ts) = TCons k $ map (subst s) ts
     subst s (TFun ts t)  = TFun (map (subst s) ts) (subst s t)
+    subst s (TBox t)  = TBox (subst s t)
 
 instance Substitutable TypeScheme where
   subst s (MonoType t) = MonoType $ subst s t
@@ -119,6 +122,7 @@ instance Show Type where
   show (TCons x []) = show x
   show (TCons x ts) = "(" ++ (intercalate " " $ (show x) : (map show ts)) ++  ")"
   show (TFun ts t) = "(" ++ (intercalate ", " $ map show ts) ++ " -> " ++ (show t) ++ ")"
+  show (TBox t) = "($$box " ++ (show t) ++ ")"
 
 instance Show a => Show (TypeSchemeT a)  where
   show (MonoType t) = show t
@@ -159,6 +163,7 @@ typeName :: Type -> Ident
 typeName (TVar i) = Ident "'t" [] (Just i)
 typeName (TCons c _) = c
 typeName (TFun xs _) = mkId $ T.pack $ replicate (length xs) ',' ++ "->"
+typeName (TBox _) = mkId $ "$$box"
 
 tInt :: Type
 tInt = TCons (mkId "int") []
@@ -209,6 +214,7 @@ encodeType t =
     encodeType' _ (TCons (Ident "int" [] Nothing) []) = ["i"]
     encodeType' _ (TCons (Ident "bool" [] Nothing) []) = ["b"]
     encodeType' _ (TCons (Ident "()" [] Nothing) []) = ["_"]
+    encodeType' vs (TBox t0) = "B" : (encodeType' vs t0)
     encodeType' vs (TCons c cs) =
       let cs' = concatMap (encodeType' vs) cs
           n0 = canonicalId c

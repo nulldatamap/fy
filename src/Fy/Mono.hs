@@ -302,21 +302,43 @@ orderBindings bs =
   let bGraph = map (\b -> (b, bName b, S.toList $ bDeps b)) bs
   in (\x -> x) $ flattenSCCs $ stronglyConnComp bGraph
 
-boxFreeVars :: TBinding -> Mono TBinding
-boxFreeVars b = do
-  case runTyping go of
+boxFreeVarsInBinding :: TBinding -> Mono TBinding
+boxFreeVarsInBinding b = do
+  nid <- mstNext <$> get
+  case runTyping' nid go of
     Left err -> error $ "Failed to box free vars: " ++ (show err)
-    Right b' -> return b'
+    Right (td', nid') -> do
+      modify (\s -> s { mstNext = nid' })
+      return td'
   where
-    vs = freeVars $ bType b
+    vs = freeVars $ innerType $ bType b
     go = do
       mapM_ (\v -> do
                 v' <- fresh
                 v =:= (TBox v'))
         vs
-      b' <- realize b
-      bt <- generalize $ innerType $ bType b
-      return $ b' { bType = bt }
+      bt <- generalize =<< (realize $ innerType $ bType b)
+      b' <- realize $ b { bType = bt }
+      return $ b' { bBody = case bBody b' of
+                              Fun f -> Fun $ f { fType = bt }
+                              bb -> bb }
+
+boxFreeVarsInTypeDef :: TypeDef -> Mono TypeDef
+boxFreeVarsInTypeDef td = do
+  nid <- mstNext <$> get
+  case runTyping' nid go of
+    Left err -> error $ "Failed to box free vars: " ++ (show err)
+    Right (td', nid') -> do
+      modify (\s -> s { mstNext = nid' })
+      return td'
+  where
+    go = do
+      let vs = tdParams td
+      vs' <- mapM (const fresh) vs
+      mapM_ (\(v, v') -> do
+                v `unify` (TBox v'))
+        $ zip vs vs'
+      realize $ td { tdParams = vs' }
 
 
 monoModule :: TModule -> Mono TModule
@@ -329,10 +351,11 @@ monoModule m = do
   bs' <- mapM monoBinding $ mItems m
   insts <- (M.elems . mstBindingInsts) <$> get
   tds' <- (orderTypeDefs . (tds ++) . M.elems . mstTypeInsts) <$> get
+  tds'' <- mapM boxFreeVarsInTypeDef orderedTds -- tds'
   nid <- mstNext <$> get
-  items' <- mapM boxFreeVars $ mItems m
+  items' <- mapM boxFreeVarsInBinding $ mItems m
   return $ m { mItems = orderBindings $ items' -- $ (map fst insts) ++ bs'
-             , mTypeDefs = orderedTds -- tds'
+             , mTypeDefs = tds''
              , mNextId = nid }
 
 monomorphise :: TModule -> TModule

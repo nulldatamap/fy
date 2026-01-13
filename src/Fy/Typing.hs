@@ -1,5 +1,5 @@
 module Fy.Typing
-  ( runTyping, unify, realize, instanciate, generalize, fresh', fresh, (=:=)
+  ( runTyping, runTyping', unify, realize, instanciate, generalize, fresh', fresh, (=:=)
   , infer
   ) where
 
@@ -107,8 +107,17 @@ generalize t = do
     [] -> return $ MonoType t
     _  -> return $ PolyType innerFrees t
 
+runTyping' :: Int -> Typing a -> Either TypingError (a, Int)
+runTyping' nid t =
+  runExcept $ do
+    (x, st) <- runStateT t $ defaultTypingSt { nextId = nid }
+    return $ (x, nextId st)
+
 runTyping :: Typing a -> Either TypingError a
-runTyping t = runExcept $ evalStateT t defaultTypingSt
+runTyping t =
+  case runTyping' 0 t of
+    Left err -> Left err
+    Right (x, st) -> Right x
 
 introTypeConses :: TypeDef -> Typing ()
 introTypeConses (TypeDef _ _ _ (TBCType _)) = return ()
